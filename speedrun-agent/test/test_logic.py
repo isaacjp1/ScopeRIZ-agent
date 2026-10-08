@@ -1,6 +1,8 @@
 """Self-checks for the deterministic logic (no browser, no network): python3 test/test_logic.py"""
 import asyncio
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -16,7 +18,8 @@ from agent.main import kind_label  # noqa: E402
 from agent.memory import Memory  # noqa: E402
 from agent.rules import Rules, check_ne  # noqa: E402
 from agent.site import from_site, learn_routes, same_origin, to_site  # noqa: E402
-from agent.solver import PROBE_CODES, Solver, plausible, run_python, startup_probe  # noqa: E402
+from agent.solver import (PROBE_CODES, Solver, checked_answer, plausible, run_python, same_answer,  # noqa: E402
+                          startup_probe)
 
 MSG = json.load(open(os.path.join(os.path.dirname(__file__), "..", "practice_items.json")))[0]["text"]
 GOOD = {"years": 3, "counting_statuses": ["Completed"], "excluded_services": ["Lab draw", "X-ray"],
@@ -186,6 +189,142 @@ def main():
     out = run_python("print('first'); raise ValueError('x')", {})
     assert out.startswith("first") and "STDERR:" in out and "ValueError" in out, out
     assert os.environ["LLM_API_KEY"] == "sk-test"   # the agent itself keeps its key
+
+    # REUSE-02/03/04: stored programs (format gate, answer equality, learn, confirm, fall back, discard on a message)
+    config.LEARN_TRIES, config.PROGRAM_STEPS, config.BUDGET, config.LOOP_BUDGET_SHARE = 2, 4, 8.0, 0.9
+    config.MIN_CONFIDENCE = 0.7
+    assert checked_answer("How many charts are open?", "12") == ("12", "")
+    v, why = checked_answer("How many charts are open?", "twelve")
+    assert v is None and why.startswith("implausible"), why
+    for bad in ("a\nb", "x" * 201, True, "", ["x"] * 51):
+        v, why = checked_answer("Which code?", bad)
+        assert v is None and why.startswith("bad format"), (bad, why)
+    assert checked_answer("Which code?", "true")[0] is None
+    assert checked_answer("Which code?", " 'NO_ACTION' ") == ("NO_ACTION", "")
+    assert checked_answer("Which code?", ["B", "A"]) == (["B", "A"], "")
+    assert same_answer("BILL_PATIENT : 40.00", "bill_patient:40.00") and same_answer(["B", "A"], ["a", "b"])
+    assert same_answer("12", 12)
+    assert not same_answer("12.5", "12.50") and not same_answer("A", ["A"])
+
+    ITEM_PROGRAM = (
+        "def step(task, pages, patients):\n"
+        "    m = re.search(r'code of item (\\d+)', task)\n"
+        "    if not m:\n"
+        "        return {'skip': 'not an item code request'}\n"
+        "    path = '/items/' + m.group(1)\n"
+        "    if path not in pages:\n"
+        "        return {'open': [path]}\n"
+        "    v = re.search(r'Code: (\\d+)', pages[path].get('text') or '')\n"
+        "    return {'answer': v.group(1)} if v else {'skip': 'no code'}\n")
+    ONE_LINE = {"m7": "return {'answer': 'true'}", "m8": "return {'answer': 'a\\nb'}", "m9": "raise ValueError('boom')"}
+    CODES = {"/items/7": "4417", "/items/8": "5521", "/items/9": "6630"}
+
+    class ProgSite:
+        cache = {}
+
+        async def read_many(self, paths):
+            return [{"path": p, "title": "Item", "text": f"Item {p[7:]}\nCode: {CODES[p]}", "tables": [], "links": []}
+                    if p in CODES else {"path": p, "error": "page did not load"} for p in paths]
+
+        async def read_document(self, path):
+            return {"text": ""}
+
+    class ProgLLM:
+        spent, calls = 0.0, 0
+
+        async def chat(self, messages, **kw):
+            self.calls += 1
+            return {"content": "```python\n" + ITEM_PROGRAM + "```", "_finish": "stop"}, {}, 0.1
+
+    def item(n):
+        return f"What is the code of item {n}?"
+    buf = io.StringIO()
+
+    async def programs():
+        s = Solver(ProgSite(), ProgLLM(), Memory())
+        loops = []
+
+        async def no_fast(text):
+            return None
+
+        async def stub_loop(text, deadline):
+            loops.append(text)
+            return "skip", None, {"why": "stub loop", "route": []}
+        s.fast.solve, s._loop = no_fast, stub_loop
+
+        async def answered(label, n, value, info):   # a loop answer of label; waits for the job it starts
+            s._after_answer(label, item(n), value, info)
+            job = s.jobs.get(label)   # taken before awaiting: a finished job removes itself
+            if job:
+                await job
+            return job
+        # learn, then confirm on a task whose answer differs from the example's, then answer from the program
+        assert await answered("m2", 7, "4417", {"convo": [], "route": ["/items/7"]})
+        assert s.programs["m2"]["confirmed"] is False and "[program] m2 learned from " in buf.getvalue()
+        assert await answered("m2", 8, "5521", {})
+        assert s.programs["m2"]["confirmed"] is True and "[program] m2 confirmed on " in buf.getvalue()
+        kind, value, info = await s.solve(item(9), time.time() + 10, allow_loop=False, label="m2")
+        assert (kind, value) == ("answer", "6630"), (kind, value, info)
+        assert info["why"] == "stored program m2" and info["route"][0] == "program:m2" and info["secs"] < 4, info
+        # hard-code guard: agreeing on the example's own answer confirms nothing
+        await answered("m4", 7, "4417", {"convo": []})
+        await answered("m4", 7, "4417", {})
+        assert s.programs["m4"]["confirmed"] is False and "not confirmed yet" in buf.getvalue()
+        # disagreement with the model loop drops the program
+        await answered("m5", 7, "4417", {"convo": []})
+        await answered("m5", 8, "9999", {})
+        assert "m5" not in s.programs and "[program] m5 discarded: it gave " in buf.getvalue()
+        # a program that does not reproduce the loop's answer is not stored; LEARN_TRIES calls per label at most
+        calls = s.llm.calls
+        assert await answered("m6", 7, "1111", {"convo": []})
+        assert "m6" not in s.programs and "[program] m6 not learned:" in buf.getvalue()
+        assert await answered("m6", 7, "1111", {"convo": []})
+        assert not await answered("m6", 7, "1111", {"convo": []})
+        assert s.llm.calls - calls == 2 and "m6" not in s.programs, s.llm.calls - calls
+        # no learning without a rule-message kind, without a transcript, or at the loop budget reserve
+        for label, info in (("unmatched", {"convo": []}), ("phone", {"convo": []}), ("m10", {})):
+            s._after_answer(label, item(7), "4417", info)
+            assert label not in s.jobs, label
+        s.llm.spent = 0.9 * config.BUDGET
+        s._after_answer("m11", item(7), "4417", {"convo": []})
+        assert "m11" not in s.jobs
+        s.llm.spent = 0.0
+        # REUSE-03: a confirmed program's miss falls back to the loop and is never sent
+        for label, body in ONE_LINE.items():
+            s.programs[label] = {"code": "def step(task, pages, patients):\n    " + body + "\n", "answer": "x",
+                                 "task": "t", "confirmed": True}
+        for label, why in (("m7", "implausible"), ("m8", "bad format"), ("m9", "program failed")):
+            n = len(loops)
+            res = await s.solve(item(9), time.time() + 10, allow_loop=True, label=label)
+            assert len(loops) == n + 1 and res == ("skip", None, {"why": "stub loop", "route": []}), (label, res)
+            assert f"[program] {label} fallback to the model loop: {why}" in buf.getvalue(), label
+        res = await s.solve(item(9), time.time() + 10, allow_loop=False, label="m7")
+        assert res[0] == "skip" and res[1] is None, res
+        # REUSE-04: a message that best matches rule message 3 discards m3 and m3/..., never m2 or m31
+        correction = "Correction: " + claim[:400]
+        s.rules.items = [vending, filing, claim]
+        assert s.rules.kind_for(correction) == 3   # fixture precondition
+        s.programs = {k: dict(s.programs["m2"]) for k in ("m3", "m3/claim_next_step", "m2", "m31")}
+        sleeper = asyncio.create_task(asyncio.sleep(60))
+        s.jobs["m3"], s.tries["m3"] = sleeper, 2
+        s.add_message(correction)
+        await asyncio.sleep(0)
+        assert sorted(s.programs) == ["m2", "m31"], sorted(s.programs)
+        assert sleeper.cancelled() and "m3" not in s.jobs and "m3" not in s.tries
+        assert "[program] m3 discarded: message 4 best matches its rule message 3" in buf.getvalue()
+        assert "[program] m3/claim_next_step discarded: message 4" in buf.getvalue()
+        await answered("m3", 7, "4417", {"convo": []})   # tries were reset: the next loop answer learns again
+        assert "m3" in s.programs and s.programs["m3"]["confirmed"] is False
+        # empty input: a message matching no long rule message, or one before any, discards nothing
+        before, lines = sorted(s.programs), buf.getvalue().count("discarded: message")
+        s.add_message("zzz qqq")
+        assert sorted(s.programs) == before and buf.getvalue().count("discarded: message") == lines
+        s2 = Solver(ProgSite(), ProgLLM(), Memory())
+        s2.programs["m1"] = dict(s.programs["m2"])
+        s2.add_message(vending)
+        assert list(s2.programs) == ["m1"] and buf.getvalue().count("discarded: message") == lines
+    with contextlib.redirect_stdout(buf):
+        asyncio.run(programs())
 
     # SAFE-03: the judge entry point names every missing URL variable and exits 1
     def require(**urls):
