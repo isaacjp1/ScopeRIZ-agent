@@ -42,6 +42,15 @@ SCENARIOS = {
         "probes": (6, "PROBE-SIGN-IN"),
         "log": ["[degraded] sign-in"],
     },
+    # dead-site under the PROBE of the environment the test runs in (the image's ENV PROBE; config.py's default 10
+    # elsewhere), so it passes only where the release setting is in force: in the image, or locally with PROBE=0.
+    "probe-off": {
+        "mock": {"MOCK_SHIFT": "90"},
+        "agent": {"SITE_URL": "http://127.0.0.1:8819", "PROBE": os.environ.get("PROBE", "10")},
+        "browser": False,
+        "probes": (0, None),
+        "log": ["[degraded] sign-in", "[probe] startup stage=sign-in -> 0 probe answers", "SKIP None in "],
+    },
     # Browser scenarios (Plan 03 runs them in the image). A MOCK_SHIFT may be raised if a run ends before its probes
     # are all sent (5 misses plus the probe count in skips are needed); a probe count is never changed.
     "clean": {
