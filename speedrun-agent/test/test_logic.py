@@ -15,7 +15,7 @@ from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED,
 from agent.memory import Memory  # noqa: E402
 from agent.rules import check_ne  # noqa: E402
 from agent.site import same_origin  # noqa: E402
-from agent.solver import Solver, plausible, run_python  # noqa: E402
+from agent.solver import PROBE_CODES, Solver, plausible, run_python, startup_probe  # noqa: E402
 
 MSG = json.load(open(os.path.join(os.path.dirname(__file__), "..", "practice_items.json")))[0]["text"]
 GOOD = {"years": 3, "counting_statuses": ["Completed"], "excluded_services": ["Lab draw", "X-ray"],
@@ -148,6 +148,28 @@ def main():
     assert not same_origin("http://site:8000.evil/")
     config.SITE_URL = "https://Site.Example:443"   # the browser reports https://site.example/...
     assert same_origin("https://site.example/x") and not same_origin("http://site.example/x")
+
+    # DIAG-01: which startup stage failed ("" = OK, None = not known yet); location needs a majority of misses
+    T, F = True, False
+    assert startup_probe(T, T, 1, 0) == ""
+    assert startup_probe(T, T, 0, 4) is None
+    assert startup_probe(T, T, 0, 5) == "search"
+    assert startup_probe(T, T, 1, 50) == ""
+    assert startup_probe(F, T, 2, 0) == ""
+    assert startup_probe(F, T, 0, 5) == "search"
+    assert startup_probe(F, F, 0, 5) == "sign-in"
+    assert startup_probe(T, F, 0, 0) is None
+    assert startup_probe(T, F, 0, 4) is None
+    assert startup_probe(T, F, 5, 0) == ""
+    assert startup_probe(T, F, 3, 2) == ""
+    assert startup_probe(F, F, 3, 3) == ""
+    assert startup_probe(T, F, 2, 3) == "location"
+    assert startup_probe(T, F, 3, 9) == "location"
+    assert startup_probe(T, F, 0, 5) == "location"
+    assert startup_probe(F, F, 2, 3) == "location"
+    assert sorted(PROBE_CODES.values()) == [1, 2, 3], PROBE_CODES
+    # decode contract at the default step 10: wrong // 10 is the stage code, wrong % 10 the normal wrongs
+    assert all((10 * c + n) // 10 == c and (10 * c + n) % 10 == n for c in (1, 2, 3) for n in range(10))
     print("all logic checks passed")
 
 

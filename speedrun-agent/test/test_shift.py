@@ -37,6 +37,34 @@ SCENARIOS = {
         "browser": False,
         "probes": (6, "PROBE-SIGN-IN"),
     },
+    # Browser scenarios (Plan 03 runs them in the image). A MOCK_SHIFT may be raised if a run ends before its probes
+    # are all sent (5 misses plus the probe count in skips are needed); a probe count is never changed.
+    "clean": {
+        "mock": {"MOCK_SHIFT": "60"},
+        "agent": {},
+        "browser": True,
+        "probes": (0, None),
+    },
+    # The session stays at Northgate: Judith Jackson and Gregory Porter hit, Carol Jones, Peter Henry and Laura Torres
+    # miss, so the verdict is "location" once the fifth date of birth is searched (2 hits, 3 misses).
+    "location": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_BREAK_LOC": "1"},
+        "agent": {},
+        "browser": True,
+        "probes": (2, "PROBE-LOCATION"),
+    },
+    "search": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_BREAK_SEARCH": "1"},
+        "agent": {},
+        "browser": True,
+        "probes": (4, "PROBE-SEARCH"),
+    },
+    "sign-in": {
+        "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_LOGIN": "1"},
+        "agent": {},
+        "browser": True,
+        "probes": (6, "PROBE-SIGN-IN"),
+    },
 }
 
 TASK_LINE = re.compile(r"^\[agent\] \S+ (?:SKIP|ANSWER) .* in (\d+(?:\.\d+)?)s \|", re.M)
@@ -84,6 +112,10 @@ def run(name, sc):
         assert "; retrying" in out, tail
         first = TASK_LINE.search(out)
         assert first and float(first.group(1)) <= 21, f"first task line: {first and first.group(0)}\n{tail}"
+    if name == "clean":
+        assert any(c.get("answer") and not str(c["answer"]).startswith("PROBE-") for c in closes), f"no answer\n{tail}"
+        assert "[site] blocked a request to blocked.example" in out, tail
+        assert "[probe] startup stage=ok" in out, tail
     if name == "dead-site":
         assert "[probe] startup stage=sign-in" in out, tail
         # every probe close keeps its per-task line
