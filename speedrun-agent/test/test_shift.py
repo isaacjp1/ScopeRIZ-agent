@@ -116,12 +116,23 @@ def run(name, sc):
         assert any(c.get("answer") and not str(c["answer"]).startswith("PROBE-") for c in closes), f"no answer\n{tail}"
         assert "[site] blocked a request to blocked.example" in out, tail
         assert "[probe] startup stage=ok" in out, tail
+        assert any("sign-in=True" in ln and "nav=" in ln for ln in out.splitlines() if "[site] ready in" in ln), tail
+        assert "[kinds] " in out, tail
     if name == "dead-site":
+        assert "[kinds] " in out, tail
         assert "[probe] startup stage=sign-in" in out, tail
         # every probe close keeps its per-task line
         lines = out.count("SKIP 'PROBE-SIGN-IN' in ")
         assert lines == len(probes), f"{lines} probe task lines for {len(probes)} probe answers\n{tail}"
     print(f"[shift] {name} ok closes={len(closes)} probes={len(probes)} last_t={closes[-1]['t']}", flush=True)
+    # echoed for Plan 03's record (routing cost, RESEARCH Pitfall 1)
+    lines = out.splitlines()
+    for tag in ("[site] ready in", "[probe] startup", "[kinds] "):
+        hit = [ln for ln in lines if ln.startswith(tag)]
+        if hit:
+            print(f"   {hit[-1][:200]}", flush=True)
+    secs = [float(s) for s in re.findall(r"^\[agent\] \S+ ANSWER .* in (\d+(?:\.\d+)?)s \|", out, re.M)]
+    print(f"   answered={len(secs)} mean={sum(secs) / len(secs) if secs else 0:.1f}s", flush=True)
 
 
 if __name__ == "__main__":

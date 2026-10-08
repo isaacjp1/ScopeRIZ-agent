@@ -11,7 +11,7 @@ import time
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 from agent import clinic, config  # noqa: E402
-from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in  # noqa: E402
+from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in, kind_of  # noqa: E402
 from agent.memory import Memory  # noqa: E402
 from agent.rules import check_ne  # noqa: E402
 from agent.site import same_origin  # noqa: E402
@@ -46,6 +46,11 @@ def main():
     assert PHONE_TASK.search(t3) and not PHONE_OTHER.search(t3)
     assert PHONE_OTHER.search("What is the phone number of the practice that referred Carol Jones (born 1982-09-07)?")
     assert DOC_TASK.search(t4) and not DOC_TASK.search(t3)
+    # DIAG-02: kind_of is the label of the deterministic path that takes a task ("" for none), in Fast.solve's order
+    assert kind_of(t1) == "new_established" and kind_of(t3) == "phone" and kind_of(t4) == "document"
+    assert kind_of("How many open slots are there for Logan Brown, MD at Northgate on 2026-10-14?") == "open_slots"
+    assert kind_of("What is the next step on claim C-1?") == "claim_next_step"
+    assert kind_of("How many patients with the last name Jones can you see?") == ""
     assert WHO_REFERRED.search("Referral letter received on 2024-12-01 for patient Ana Corbett: which practice made the referral?")
     assert not WHO_REFERRED.search(t4)
     m = re.search(r"(?:^| \| )referral letter from (.+?)(?: \||$)","Dec 1, 2024 | Referral letter | Referral letter from Granite Fork Internal Medicine | View", re.I)
