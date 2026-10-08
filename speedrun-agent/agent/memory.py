@@ -1,10 +1,15 @@
-"""Workflow memory: how earlier tasks of the same kind were solved.
+"""Shift memory, two jobs.
 
-Each solved task stores the sequence of pages that led to the answer. A new task that looks like an
-earlier one gets that route as a hint, so the model can jump straight to the right pages instead of
-exploring again. This is what makes the agent get faster during the shift.
+Route hints: each solved task stores the sequence of pages that led to the answer. A new task that looks like an
+earlier one gets that route as a hint, so the model can jump straight to the right pages instead of exploring again.
+
+Kind records: per kind (the rule message a task matches, REUSE-01) the answers and the skips in a row so far. They
+decide each task's time (allot): a kind that keeps failing while time is short is written off and skipped in about
+SKIP_SECONDS, with a longer retry now and then (TIME-01).
 """
 import re
+
+from . import config
 
 STOP = set("""a an the of for to in on at by with and or is was are be do does did what which who whom
 how many much when where our we patient patients please""".split())
@@ -29,8 +34,9 @@ def signature(text):
 class Memory:
     def __init__(self):
         self.items = []     # dicts: text, sig, route, answer
-        self.outcomes = []  # (signature, answered) of model-loop tasks
-        self.hopeless_seen = []  # signatures of tasks of hopeless kinds, to space out exploration tries
+        self.kinds = {}     # kind label -> [answered, skips in a row, written-off tasks]
+        self.tasks = 0      # tasks allotted so far
+        self.written_off = 0   # of those, how many were written off (retries not counted)
 
     def add(self, text, route, answer):
         self.items.append({"text": text, "sig": signature(text), "route": route[:12], "answer": answer})
@@ -68,24 +74,25 @@ class Memory:
             parts.append(f"- Task: {it['text'][:300]}\n  Route: {route}\n  Answer sent: {it['answer']}")
         return "\n".join(parts)
 
-    # ---- outcomes of model-loop tasks, to stop paying for kinds of task the agent never answers ----
-    def outcome(self, text, answered):
-        self.outcomes.append((signature(text), answered))
+    # ---- per-kind records: only the main shift loop reads and writes them, between queue items ----
+    def outcome(self, kind, answered):
+        rec = self.kinds.setdefault(kind, [0, 0, 0])
+        if answered:
+            rec[0] += 1
+            rec[1] = 0
+        else:
+            rec[1] += 1
 
-    def answered_like(self, text, threshold=0.6):
-        """How many earlier model-loop tasks like this one were answered."""
-        s = signature(text)
-        return sum(1 for sig, a in self.outcomes if a and s and len(s & sig) / (len(s | sig) or 1) >= threshold)
-
-    def hopeless(self, text, n, threshold=0.6):
-        """True if at least n earlier loop tasks like this one were all skipped."""
-        s = signature(text)
-        like = [a for sig, a in self.outcomes if s and len(s & sig) / (len(s | sig) or 1) >= threshold]
-        return len(like) >= n and not any(like)
-
-    def explore_turn(self, text, every, threshold=0.6):
-        """Called for each task of a hopeless kind: True on every `every`-th one, which gets a longer try."""
-        s = signature(text)
-        n = sum(1 for sig in self.hopeless_seen if s and len(s & sig) / (len(s | sig) or 1) >= threshold)
-        self.hopeless_seen.append(s)
-        return every > 0 and n % every == every - 1
+    def allot(self, kind, secs_left, tasks_left):
+        """(mode, seconds) for the next task of this kind. 'written-off' (deterministic paths only) or, on every
+        EXPLORE_EVERY-th written-off task when the time left covers it, 'retry' with the model loop; else 'new'."""
+        self.tasks += 1
+        rec = self.kinds.setdefault(kind, [0, 0, 0])
+        if secs_left / max(1, tasks_left) < config.TIGHT_FAIR_SECONDS and rec[1] >= config.HOPELESS_AFTER:
+            rec[2] += 1
+            if config.EXPLORE_EVERY > 0 and rec[2] % config.EXPLORE_EVERY == 0 \
+                    and secs_left - config.EXPLORE_SECONDS > tasks_left * config.SKIP_SECONDS:
+                return "retry", config.EXPLORE_SECONDS
+            self.written_off += 1
+            return "written-off", config.SKIP_SECONDS
+        return "new", config.task_cap(secs_left, tasks_left)

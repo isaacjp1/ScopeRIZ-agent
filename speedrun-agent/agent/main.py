@@ -12,13 +12,26 @@ from .site import Site
 from .solver import PROBE_CODES, Solver, startup_probe
 
 
+# Skip reasons that say nothing about the task's kind (startup, model budget, model errors): never recorded.
+NOT_TRIED = ("site not ready", "budget", "model budget reserve", "llm ")
+
+
 def log(*a):
     print("[agent]", *a, flush=True)
 
 
+def kind_label(rules, text):
+    """REUSE-01: (label, n), where n is the rule message the task best matches (0 for none). The deterministic path
+    name is added, so tasks a code solver takes are never pooled with model-loop tasks of the same message."""
+    n, rx = rules.kind_for(text), kind_of(text)
+    if n:
+        return f"m{n}" + (f"/{rx}" if rx else ""), n
+    return rx or "unmatched", n
+
+
 def print_kinds(kinds):
     """Per-kind summary. Printed every 25 tasks too, because the judge may stop the container at time-out and the
-    periodic line is what survives in the Set 1 log. Phase 3 (REUSE-01) replaces the label with the rule-message kind."""
+    periodic line is what survives in the Set 1 log. The label is the rule-message kind (REUSE-01, kind_label)."""
     rows = " | ".join(f"{k} {s}/{a}/{n} {secs:.0f}s" for k, (s, a, n, secs) in kinds.items())
     print(f"[kinds] {rows or '(no tasks)'}", flush=True)
 
@@ -53,6 +66,7 @@ async def run():
     stats = {"answered": 0, "skipped": 0, "messages": 0, "probe": 0}
     stage, probes_left = None, 0   # DIAG-01: the failed startup stage, decided once ("" = startup OK)
     kinds = {}   # DIAG-02: label -> [seen, answered, skipped, seconds], in first-seen order
+    recorded = set()   # item ids whose outcome moved a kind record: a re-served item never counts twice
     if config.SHIFT_SECONDS == 1200 and os.environ.get("RECON", "1") == "1":
         # Practice only (20 min for 6 tasks): map the app's pages before the queue, since the run stops when it ends.
         await site.ready.wait()
@@ -91,18 +105,18 @@ async def run():
             t0 = time.time()   # the task's clock starts at receipt, so the logged time includes any startup wait
             tasks_seen += 1
             tasks_left = max(1, est_tasks - tasks_seen + 1)
-            deadline = min(time.time() + config.task_cap(secs_left, tasks_left), shift_end)
-            # When time is short, kinds of task that the model loop never answered get only the deterministic paths.
-            allow_loop = not (secs_left / tasks_left < config.TIGHT_FAIR_SECONDS
-                              and memory.hopeless(item["text"], config.HOPELESS_AFTER))
-            if allow_loop and memory.answered_like(item["text"]) \
-                    and secs_left / tasks_left > config.KNOWN_KIND_MIN_FAIR:
-                deadline = max(deadline, min(time.time() + config.KNOWN_KIND_SECONDS, shift_end))
-            if not allow_loop and memory.explore_turn(item["text"], config.EXPLORE_EVERY) \
-                    and secs_left - config.EXPLORE_SECONDS > tasks_left * config.SKIP_SECONDS:
-                allow_loop = True
-                deadline = min(time.time() + config.EXPLORE_SECONDS, shift_end)
-                log(f"{item['id']} exploring a hopeless kind for up to {config.EXPLORE_SECONDS:.0f}s")
+            label, n = kind_label(solver.rules, item["text"])
+            if label not in kinds:
+                title = solver.rules.items[n - 1].strip().split("\n")[0][:80] if n else ""
+                print(f"[kind] {label} <- message {n}: {title!r}" if n else f"[kind] {label} <- no rule message",
+                      flush=True)
+            row = kinds.setdefault(label, [0, 0, 0, 0.0])   # seen, answered, skipped (a probe counts as its skip), secs
+            # TIME-01: a kind that keeps failing while time is short gets only the deterministic paths, in ~2 s.
+            mode, cap = memory.allot(label, secs_left, tasks_left)
+            deadline = min(time.time() + cap, shift_end)
+            allow_loop = mode != "written-off"
+            if mode == "retry":
+                log(f"{item['id']} retrying written-off kind {label} for up to {cap:.0f}s")
             # Model listing is not awaited (LLM.chat waits on llm.ready inside the task's own caps), and sign-in is
             # waited for only until this task's deadline: a slow startup can cost the first tasks, never the shift.
             try:
@@ -145,9 +159,13 @@ async def run():
                 stats["skipped"] += 1
                 state = await queue.close(item["id"], skip=True)
             log(f"{item['id']} {kind.upper()} {value!r} in {time.time() - t0:.1f}s | {info.get('why', '')} "
-                f"conf={info.get('conf', '')} pages={len(info.get('route', []))} | task: {item['text']!r}")
-            label = kind_of(item["text"]) or f"after-msg{stats['messages']}"
-            row = kinds.setdefault(label, [0, 0, 0, 0.0])   # seen, answered, skipped (a probe counts as its skip), secs
+                f"conf={info.get('conf', '')} pages={len(info.get('route', []))} kind={label} {mode} cap={cap:.0f}s "
+                f"| task: {item['text']!r}")
+            # Only tried tasks move the record: a written-off skip says nothing new, and a probe counts as its skip.
+            if not str(info.get("why", "")).startswith(NOT_TRIED) and (mode != "written-off" or kind == "answer") \
+                    and item["id"] not in recorded:
+                recorded.add(item["id"])
+                memory.outcome(label, kind == "answer")
             row[0] += 1
             row[1 if kind == "answer" else 2] += 1
             row[3] += time.time() - t0

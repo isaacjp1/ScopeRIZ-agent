@@ -121,6 +121,18 @@ SCENARIOS = {
         "served": ["/records?", "/invoices?", "/people/"],
         "not_served": ["/patients", "/schedule", "/billing", "/documents"],
     },
+    # TIGHT_FAIR_SECONDS=1000: time is always short, so the write-off policy runs for the whole shift. The fake model
+    # always skips the Jones count (i008, plain kind m1): it is written off after 3 tries, the answering kinds never.
+    "write-off": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_MESSAGES_ONCE": "1"},
+        "agent": {"TIGHT_FAIR_SECONDS": "1000", "HOPELESS_AFTER": "3"},
+        "browser": True,
+        "probes": (0, None),
+        "log": ["[kind] m1 <- message 1", "retrying written-off kind m1 "],
+        "not_log": ["[degraded]"],
+        "must_answer": ["ESTABLISHED:2025-07-21", "0", "Chronic cough lasting more than eight weeks"],
+        "max_wrong": 0,
+    },
     "sign-in": {
         "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_LOGIN": "1"},
         "agent": {},
@@ -131,6 +143,9 @@ SCENARIOS = {
 }
 
 TASK_LINE = re.compile(r"^\[agent\] \S+ (?:SKIP|ANSWER) .* in (\d+(?:\.\d+)?)s \|", re.M)
+# seconds, kind label, mode of a per-task line
+KIND_LINE = re.compile(r"^\[agent\] \S+ (?:SKIP|ANSWER) .* in (\d+(?:\.\d+)?)s \| .* kind=(\S+) (\S+) cap=\d+s \| task:",
+                       re.M)
 
 
 def run(name, sc):
@@ -184,6 +199,15 @@ def run(name, sc):
         assert "[probe] startup stage=ok" in out, tail
         assert any("sign-in=True" in ln and "nav=" in ln for ln in out.splitlines() if "[site] ready in" in ln), tail
         assert "[kinds] " in out, tail
+    if name == "write-off":
+        rows = [(float(sec), label, mode) for sec, label, mode in KIND_LINE.findall(out)]
+        off = [r for r in rows if r[2] == "written-off"]
+        assert off, f"no written-off task line\n{tail}"
+        assert all(r[1] == "m1" for r in off), f"written off: {sorted({r[1] for r in off})}\n{tail}"
+        assert all(r[0] <= 2.0 for r in off), f"slowest written-off task {max(r[0] for r in off)}s\n{tail}"
+        first = rows.index(off[0])
+        tries = [r for r in rows[:first] if r[1] == "m1" and r[2] == "new"]
+        assert len(tries) >= 3, f"{len(tries)} new m1 tries before the write-off\n{tail}"
     if name == "dead-site":
         assert "[kinds] " in out, tail
         assert "[probe] startup stage=sign-in" in out, tail

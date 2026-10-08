@@ -377,6 +377,15 @@ def queue_down():
     return a <= elapsed() <= b
 
 
+def cycled(i):
+    """The i-th item of a timed shift. MOCK_MESSAGES_ONCE=1: messages only in the first cycle. A resent rule starts a
+    new kind label (REUSE-01), so a scenario that follows one kind's record across cycles must not resend its rule."""
+    if os.environ.get("MOCK_MESSAGES_ONCE") and i >= len(ITEMS):
+        tasks = [x for x in ITEMS if x["kind"] == "task"]
+        return tasks[(i - len(ITEMS)) % len(tasks)]
+    return ITEMS[i % len(ITEMS)]
+
+
 class Q(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -398,7 +407,7 @@ class Q(BaseHTTPRequestHandler):
             left = float(shift) - elapsed()
             if left <= 0:
                 return {"status": "ended", "reason": "time"}
-            it = ITEMS[i % len(ITEMS)]
+            it = cycled(i)
             return {"status": "open", "seconds_left": round(left, 1),
                     "item": {"id": f"{it['id']}-{i}", "kind": it["kind"], "text": it["text"]}}
         if i >= len(ITEMS):
@@ -427,7 +436,7 @@ class Q(BaseHTTPRequestHandler):
             return self._json(409, {"error": {"code": "ended"}, "state": st})
         if body.get("id") != st["item"]["id"]:
             return self._json(409, {"error": {"code": "not_current"}, "state": st})
-        it = ITEMS[QSTATE["i"] % len(ITEMS)]
+        it = cycled(QSTATE["i"])
         QSTATE["log"].append({**body, "expected": it.get("expected"), "t": round(elapsed(), 1)})
         QSTATE["i"] += 1
         self._json(200, self.state())

@@ -143,13 +143,9 @@ class Rules:
                 return None
         return self.ne
 
-    def for_task(self, task_text, top=2, short_chars=4000):
-        """The messages a model-loop prompt needs: the long rule messages that best fit the task (words weighted by
-        how few messages use them, so 'patient' counts for little and 'tetanus' for a lot) plus the latest short
-        messages (facts, exceptions, changes to a rule), in the order received. Falls back to relevant() when no rule
-        shares a distinctive word with the task."""
-        if not self.items:
-            return "(none yet)"
+    def _ranked(self, task_text):
+        """(score, index) of every long rule message (1200+ chars) for this task, best first. Each shared word of 4+
+        letters weighs log(1 + n/df); a tie goes to the higher index, the newer message."""
         toks = [set(re.findall(r"[a-z]{4,}", t.lower())) for t in self.items]
         n = len(toks)
         df = {}
@@ -158,7 +154,23 @@ class Rules:
                 df[w] = df.get(w, 0) + 1
         words = set(re.findall(r"[a-z]{4,}", task_text.lower()))
         longs = [i for i, t in enumerate(self.items) if len(t) >= 1200]
-        scored = sorted(((sum(math.log(1 + n / df[w]) for w in words & toks[i]), i) for i in longs), reverse=True)
+        return sorted(((sum(math.log(1 + n / df[w]) for w in words & toks[i]), i) for i in longs), reverse=True)
+
+    def kind_for(self, task_text):
+        """REUSE-01: the kind of a task is the rule message it best matches, as its 1-based number, or 0 for none.
+        Short messages (facts, chatter, rule changes) never become kinds."""
+        scored = self._ranked(task_text)
+        return scored[0][1] + 1 if scored and scored[0][0] > 0 else 0
+
+    def for_task(self, task_text, top=2, short_chars=4000):
+        """The messages a model-loop prompt needs: the long rule messages that best fit the task (words weighted by
+        how few messages use them, so 'patient' counts for little and 'tetanus' for a lot) plus the latest short
+        messages (facts, exceptions, changes to a rule), in the order received. Falls back to relevant() when no rule
+        shares a distinctive word with the task."""
+        if not self.items:
+            return "(none yet)"
+        scored = self._ranked(task_text)
+        longs = {i for _, i in scored}
         if not scored or scored[0][0] <= 0:
             return self.relevant(task_text)
         keep = {i for s, i in scored[:top] if s >= scored[0][0] * 0.5}

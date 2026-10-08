@@ -295,7 +295,6 @@ class Solver:
         kind, value, info = await self._loop(task_text, deadline)
         if kind == "answer" and not plausible(task_text, value):
             kind, info = "skip", {**info, "why": f"implausible answer {value!r}"[:150]}
-        self.memory.outcome(task_text, kind == "answer")
         return confidence_gate(kind, value, info)
 
     async def _loop(self, task_text, deadline):
