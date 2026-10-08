@@ -236,6 +236,13 @@ class Site:
             await asyncio.sleep(2)
         # a snapshot, because _relogin resets location_ok mid-shift
         self.startup = {"signed_in": self.signed_in and not self.error, "location_ok": self.location_ok and not self.error}
+        if not self.startup["signed_in"]:
+            why = f" ({self.error[:150]})" if self.error else ""
+            print(f"[degraded] sign-in: not confirmed{why}; tasks keep running, and a read that lands on a sign-in page "
+                  "signs in again (at most 4 times a shift)", flush=True)
+        if not self.startup["location_ok"]:
+            print("[degraded] location: All locations not confirmed; patients are also looked up through the documents "
+                  "and billing lists, and new/established answers wait for a confirmed switch", flush=True)
         self.ready.set()
 
     async def _start_once(self):
@@ -267,7 +274,12 @@ class Site:
             # limit: a redirect from SITE_URL to another host is followed without calling the handler again (Playwright routes the original request only); the judge network refuses other hosts
             await self.ctx.route("**/*", _guard)
             first = await self._new_page()
-            await self._login(first)
+            # Degraded, not dead: an open site, or a read that lands on the sign-in page and signs in again through
+            # _relogin, still works; only a browser failure (caught by the outer except) ends the attempt.
+            try:
+                await self._login(first)
+            except Exception as e:
+                print(f"[site] sign-in failed: {e!r}"[:200], flush=True)
             self.last_login = time.time()
             try:
                 if await self._wait_content(first, seconds=4):
@@ -318,6 +330,7 @@ class Site:
 
     async def _login(self, page):
         """Sign in. Clinic versions differ: the form may live at /login, or / may redirect to it under another name."""
+        self.signed_in = False   # a later startup attempt never inherits an earlier attempt's result
         fr = pw_el = None
         for path, secs in (("/login", 6), ("/", 4)):
             try:
@@ -343,7 +356,13 @@ class Site:
         if user_el:
             await user_el.fill(config.SITE_USERNAME)
         await pw_el.fill(config.SITE_PASSWORD)
-        await pw_el.press("Enter")
+        # The press waits for the sign-in POST's navigation under the 12 s context default: a 15 s sign-in raised here
+        # and failed all 3 startup attempts (Phase 1 deferred item). 3 x NAV_TIMEOUT covers a slow clinic; a dead
+        # site still fails fast at goto.
+        try:
+            await pw_el.press("Enter", timeout=config.NAV_TIMEOUT * 3000)
+        except Exception as e:
+            print(f"[site] sign-in submit still waiting: {e!r}"[:200], flush=True)
         for fallback in range(3):
             end = time.time() + 2.5
             while time.time() < end and "/login" in page.url:

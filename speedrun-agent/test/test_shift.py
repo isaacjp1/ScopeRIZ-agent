@@ -20,6 +20,8 @@ sys.path.insert(0, ROOT)
 
 # name -> mock: MOCK_* env for the mock; agent: env overrides for the agent; browser: needs Playwright;
 # probes: None, or (count, value) expected among the answers that start "PROBE-".
+# Optional: log / not_log: strings that must / must not appear in the agent output; correct: minimum correct non-probe
+# answers; must_answer: answers that must be among the correct ones; max_wrong: most non-probe answers allowed wrong.
 SCENARIOS = {
     # Queue down from second 15 to 30, model listing 20 s late, sign-in 15 s late. MODEL is unset so listing runs, and
     # MODEL_PREFS=fake makes it pick the mock's model (an anthropic/ id would break the scripted fake model).
@@ -36,6 +38,7 @@ SCENARIOS = {
         "agent": {"SITE_URL": "http://127.0.0.1:8819"},
         "browser": False,
         "probes": (6, "PROBE-SIGN-IN"),
+        "log": ["[degraded] sign-in"],
     },
     # Browser scenarios (Plan 03 runs them in the image). A MOCK_SHIFT may be raised if a run ends before its probes
     # are all sent (5 misses plus the probe count in skips are needed); a probe count is never changed.
@@ -44,6 +47,17 @@ SCENARIOS = {
         "agent": {},
         "browser": True,
         "probes": (0, None),
+        "not_log": ["[degraded]"],
+    },
+    # Sign-in POST answers after 15 s, longer than the 12 s navigation timeout (Phase 1 deferred item).
+    "slow-sign-in": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_SLOW_LOGIN": "15"},
+        "agent": {},
+        "browser": True,
+        "probes": (0, None),
+        "log": ["sign-in=True", "[probe] startup stage=ok"],
+        "not_log": ["[degraded]"],
+        "correct": 1,
     },
     # The session stays at Northgate: Judith Jackson and Gregory Porter hit, Carol Jones, Peter Henry and Laura Torres
     # miss, so the verdict is "location" once the fifth date of birth is searched (2 hits, 3 misses).
@@ -64,6 +78,7 @@ SCENARIOS = {
         "agent": {},
         "browser": True,
         "probes": (6, "PROBE-SIGN-IN"),
+        "log": ["[degraded] sign-in"],
     },
 }
 
@@ -124,10 +139,23 @@ def run(name, sc):
         # every probe close keeps its per-task line
         lines = out.count("SKIP 'PROBE-SIGN-IN' in ")
         assert lines == len(probes), f"{lines} probe task lines for {len(probes)} probe answers\n{tail}"
-    print(f"[shift] {name} ok closes={len(closes)} probes={len(probes)} last_t={closes[-1]['t']}", flush=True)
+    for want in sc.get("log", []):
+        assert want in out, f"missing {want!r} in the output\n{tail}"
+    for bad in sc.get("not_log", []):
+        assert bad not in out, f"unexpected {bad!r} in the output\n{tail}"
+    answers = [c for c in closes if "answer" in c and not str(c["answer"]).startswith("PROBE-")]
+    right = [str(c["answer"]) for c in answers if str(c["answer"]) == str(c.get("expected"))]
+    wrong = [(c["answer"], c.get("expected")) for c in answers if str(c["answer"]) != str(c.get("expected"))]
+    assert len(right) >= sc.get("correct", 0), f"{len(right)} correct answers, expected at least {sc['correct']}\n{tail}"
+    for want in sc.get("must_answer", []):
+        assert want in right, f"no correct answer {want!r} (correct: {right})\n{tail}"
+    if "max_wrong" in sc:
+        assert len(wrong) <= sc["max_wrong"], f"{len(wrong)} wrong answers {wrong}\n{tail}"
+    print(f"[shift] {name} ok closes={len(closes)} probes={len(probes)} last_t={closes[-1]['t']} "
+          f"correct={len(right)} wrong={len(wrong)}", flush=True)
     # echoed for Plan 03's record (routing cost, RESEARCH Pitfall 1)
     lines = out.splitlines()
-    for tag in ("[site] ready in", "[probe] startup", "[kinds] "):
+    for tag in ("[site] ready in", "[probe] startup", "[kinds] ", "[degraded]"):
         hit = [ln for ln in lines if ln.startswith(tag)]
         if hit:
             print(f"   {hit[-1][:200]}", flush=True)
