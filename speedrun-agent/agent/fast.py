@@ -119,6 +119,21 @@ async def pick_patient(site, task, without=()):
     return {**active[0], "paths": list(dict.fromkeys([active[0]["path"]] + [r["path"] for r in merged]))}, dob
 
 
+def kind_of(task):
+    """Name of the deterministic path that takes this task, "" for none; also the label of the per-kind summary."""
+    from . import solvers   # Set 1 kinds (appointment counts, open slots, filing deadlines, claim next step); circular
+    for match, solve in solvers.KINDS:
+        if match.search(task):
+            return solve.__name__
+    if NE_TASK.search(task):
+        return "new_established"
+    if PHONE_TASK.search(task) and not PHONE_OTHER.search(task):
+        return "phone"
+    if DOC_TASK.search(task):
+        return "document"
+    return ""
+
+
 def no(why):
     print(f"[fast] fallback to the model loop: {why}", flush=True)
     return None
@@ -129,17 +144,14 @@ class Fast:
         self.site, self.llm, self.rules = site, llm, rules
 
     async def solve(self, task):
-        from . import solvers   # Set 1 kinds (appointment counts, open slots, filing deadlines, claim next step)
-        for match, solve in solvers.KINDS:
-            if match.search(task):
+        from . import solvers   # circular import, as in kind_of
+        label = kind_of(task)   # the dispatch order lives in kind_of only
+        if not label:
+            return None
+        for _, solve in solvers.KINDS:
+            if solve.__name__ == label:
                 return await solve(self, task)
-        if NE_TASK.search(task):
-            return await self.new_established(task)
-        if PHONE_TASK.search(task) and not PHONE_OTHER.search(task):
-            return await self.phone(task)
-        if DOC_TASK.search(task):
-            return await self.document(task)
-        return None
+        return await getattr(self, label)(task)   # new_established, phone, document
 
     async def new_established(self, task):
         rule = await self.rules.ne_rule()

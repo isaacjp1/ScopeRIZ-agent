@@ -280,8 +280,10 @@ class Site:
             extra = await asyncio.gather(*[self._new_page() for _ in range(max(0, config.PAGE_POOL - 1))])
             for p in extra:
                 self.pages.put_nowait(p)
-            print(f"[site] ready in {time.time() - t0:.1f}s  location_ok={self.location_ok} today={self.today!r}",
-                  flush=True)
+            # navigation learned from the dashboard: what Phase 2 (ROB-02) needs to know about an unseen clinic
+            nav = sorted({h.split("?")[0] for _, h in self.cache.get("/", {}).get("links", []) if h.startswith("/")})
+            print(f"[site] ready in {time.time() - t0:.1f}s  sign-in={self.signed_in} location_ok={self.location_ok} "
+                  f"today={self.today!r} nav={len(nav)} {nav[:25]}", flush=True)
         except Exception as e:  # keep the agent alive; tasks will be skipped
             self.error = repr(e)
             print(f"[site] startup failed: {e!r}", flush=True)

@@ -4,6 +4,7 @@ import os
 import time
 
 from . import config
+from .fast import kind_of
 from .llm import LLM, BudgetExhausted
 from .memory import Memory
 from .queue import Queue
@@ -13,6 +14,13 @@ from .solver import PROBE_CODES, Solver, startup_probe
 
 def log(*a):
     print("[agent]", *a, flush=True)
+
+
+def print_kinds(kinds):
+    """Per-kind summary. Printed every 25 tasks too, because the judge may stop the container at time-out and the
+    periodic line is what survives in the Set 1 log. Phase 3 (REUSE-01) replaces the label with the rule-message kind."""
+    rows = " | ".join(f"{k} {s}/{a}/{n} {secs:.0f}s" for k, (s, a, n, secs) in kinds.items())
+    print(f"[kinds] {rows or '(no tasks)'}", flush=True)
 
 
 async def run():
@@ -44,6 +52,7 @@ async def run():
 
     stats = {"answered": 0, "skipped": 0, "messages": 0, "probe": 0}
     stage, probes_left = None, 0   # DIAG-01: the failed startup stage, decided once ("" = startup OK)
+    kinds = {}   # DIAG-02: label -> [seen, answered, skipped, seconds], in first-seen order
     if config.SHIFT_SECONDS == 1200 and os.environ.get("RECON", "1") == "1":
         # Practice only (20 min for 6 tasks): map the app's pages before the queue, since the run stops when it ends.
         await site.ready.wait()
@@ -137,7 +146,14 @@ async def run():
                 state = await queue.close(item["id"], skip=True)
             log(f"{item['id']} {kind.upper()} {value!r} in {time.time() - t0:.1f}s | {info.get('why', '')} "
                 f"conf={info.get('conf', '')} pages={len(info.get('route', []))} | task: {item['text']!r}")
+            label = kind_of(item["text"]) or f"after-msg{stats['messages']}"
+            row = kinds.setdefault(label, [0, 0, 0, 0.0])   # seen, answered, skipped (a probe counts as its skip), secs
+            row[0] += 1
+            row[1 if kind == "answer" else 2] += 1
+            row[3] += time.time() - t0
             log(f"   left {state.get('seconds_left', 0):.0f}s  spent ${llm.spent:.3f}  {stats}")
+            if tasks_seen % 25 == 0:
+                print_kinds(kinds)
             if llm.budget_gone and state.get("status") == "open":
                 log("model budget used up")
         except Exception as e:
@@ -148,7 +164,8 @@ async def run():
                 state = await queue.close(item["id"], **field)
             else:
                 state = await queue.current()
-    log(f"done: {state} {stats} spent=${llm.spent:.3f} calls={llm.calls} wall={time.time() - start:.0f}s")
+    print_kinds(kinds)
+    log(f"done:{state} {stats} spent=${llm.spent:.3f} calls={llm.calls} wall={time.time() - start:.0f}s")
     site_task.cancel()
     warm_task.cancel()
     await site.close()
