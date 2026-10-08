@@ -332,6 +332,7 @@ class Site:
         """Sign in. Clinic versions differ: the form may live at /login, or / may redirect to it under another name."""
         self.signed_in = False   # a later startup attempt never inherits an earlier attempt's result
         fr = pw_el = None
+        named = False
         for path, secs in (("/login", 6), ("/", 4)):
             try:
                 await page.goto(config.SITE_URL + path, wait_until="commit")
@@ -341,10 +342,27 @@ class Site:
             fr, pw_el = await self._find_frame(page, "input[type=password]", seconds=secs)
             if pw_el:
                 break
+            # Two-step sign-in: the user name first, the password on the next page. Only on a sign-in URL, so
+            # credentials never go into an app page (the practice clinic's /login sends visitors straight into the app).
+            if self._is_login_page({}, page.url):
+                _, name_el = await self._find_frame(
+                    page, "input[type=email], input[autocomplete=username], input[name*=user i], input[name*=email i], "
+                          "input[type=text]", seconds=1)
+                if name_el:
+                    await name_el.fill(config.SITE_USERNAME)
+                    named = True
+                    try:
+                        await name_el.press("Enter", timeout=config.NAV_TIMEOUT * 3000)
+                    except Exception as e:
+                        print(f"[site] sign-in name step: {e!r}"[:200], flush=True)
+                    fr, pw_el = await self._find_frame(page, "input[type=password]", seconds=secs)
+                    if pw_el:
+                        break
         if not pw_el:
             print(f"[site] no login form (already signed in or open site), at {page.url}", flush=True)
-            # an open site such as practice counts as signed in, a page that never loaded does not
-            self.signed_in = page.url.startswith(config.SITE_URL)
+            # an open site such as practice counts as signed in; a page that never loaded, or a sign-in page with no
+            # password field, does not
+            self.signed_in = page.url.startswith(config.SITE_URL) and not self._is_login_page({}, page.url)
             return
         user_el = None
         for sel in ["input[type=email]", "input[autocomplete=username]", "input[name*=user i]", "input[id*=user i]",
@@ -353,7 +371,7 @@ class Site:
             user_el = await fr.query_selector(sel)
             if user_el:
                 break
-        if user_el:
+        if user_el and not named:   # after a name step a user field here may be hidden, and fill would wait on it
             await user_el.fill(config.SITE_USERNAME)
         await pw_el.fill(config.SITE_PASSWORD)
         # The press waits for the sign-in POST's navigation under the 12 s context default: a 15 s sign-in raised here
@@ -365,9 +383,9 @@ class Site:
             print(f"[site] sign-in submit still waiting: {e!r}"[:200], flush=True)
         for fallback in range(3):
             end = time.time() + 2.5
-            while time.time() < end and "/login" in page.url:
+            while time.time() < end and self._is_login_page({}, page.url):
                 await asyncio.sleep(0.1)
-            if "/login" not in page.url:
+            if not self._is_login_page({}, page.url):
                 break
             try:
                 if fallback == 0:
@@ -379,7 +397,7 @@ class Site:
             except Exception:
                 pass
         still = await self._find_frame(page, "input[type=password]", seconds=0.5)
-        self.signed_in = not still[1] and "/login" not in page.url
+        self.signed_in = not still[1] and not self._is_login_page({}, page.url)
         print(f"[site] signed in, now at {page.url}" + (" (WARNING: a password field is still shown)" if still[1] else ""),
               flush=True)
 
@@ -442,7 +460,7 @@ class Site:
     async def _all_locations(self, page):
         """Patient search and charts are scoped to the working location. Switch to All locations with real
         (trusted) clicks, then check the switcher really says so. The switch is a POST plus a reload."""
-        if "/login" in page.url or page.url == "about:blank":
+        if self._is_login_page({}, page.url) or page.url == "about:blank":
             await page.goto(config.SITE_URL + "/", wait_until="commit")
         await self._wait_content(page)
         for attempt in range(4):

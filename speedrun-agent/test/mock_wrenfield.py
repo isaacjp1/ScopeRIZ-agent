@@ -255,6 +255,9 @@ def content(s, path):
 
 LOGIN_FORM = ('<html><body><form method="post" action="/login"><input type="text" name="u">'
               '<input type="password" name="pw"><button type="submit">Sign in</button></form></body></html>')
+# MOCK_LOGIN=two-step: the user name page first; POST /login/identify answers with the password form.
+LOGIN_STEP1 = ('<html><body><form method="post" action="/login/identify"><input type="email" name="email">'
+               '<button type="submit">Next</button></form></body></html>')
 
 
 class Site(BaseHTTPRequestHandler):
@@ -275,7 +278,7 @@ class Site(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/login"):
-            return self._send(200, LOGIN_FORM)
+            return self._send(200, LOGIN_STEP1 if os.environ.get("MOCK_LOGIN") == "two-step" else LOGIN_FORM)
         s = sess(self)
         if not s:
             return self._send(302, "", headers={"Location": "/login"})
@@ -296,6 +299,8 @@ class Site(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(n)
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+        if self.path.startswith("/login/identify"):
+            return self._send(200, LOGIN_FORM)
         if self.path.startswith("/login"):
             time.sleep(float(os.environ.get("MOCK_SLOW_LOGIN") or 0))
             if os.environ.get("MOCK_BREAK_LOGIN"):   # sign-in never works: the form again, no session

@@ -73,6 +73,17 @@ SCENARIOS = {
         "browser": True,
         "probes": (4, "PROBE-SEARCH"),
     },
+    # User name on one page, password on the next (POST /login/identify). The name field is type=email, so the user
+    # name must be an address: Chromium's form check blocks the submit of "agent", as it would for a person.
+    "two-step": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_LOGIN": "two-step"},
+        "agent": {"SITE_USERNAME": "agent@clinic.test"},
+        "browser": True,
+        "probes": (0, None),
+        "log": ["sign-in=True", "[probe] startup stage=ok"],
+        "not_log": ["[degraded]"],
+        "correct": 1,
+    },
     "sign-in": {
         "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_LOGIN": "1"},
         "agent": {},
