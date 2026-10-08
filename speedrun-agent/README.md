@@ -46,6 +46,7 @@ arena leaderboard
 | LOOP_BUDGET_SHARE | 0.9 | The model loop stops at this share of BUDGET |
 | HOPELESS_AFTER | 3 | Write a rule-message kind off (2 s, no model loop) when time is short and this many of its tasks in a row were skipped |
 | TIGHT_FAIR_SECONDS | 6 | "Time is short" = fewer seconds than this left per remaining task |
+| LEARN_TRIES | 2 | Model calls that write a stored program per kind (REUSE-02); 0 = no stored programs |
 
 ## Optional: try it on your machine against the practice clinic
 ```

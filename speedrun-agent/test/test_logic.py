@@ -279,7 +279,8 @@ def main():
         assert await answered("m6", 7, "1111", {"convo": []})
         assert "m6" not in s.programs and "[program] m6 not learned:" in buf.getvalue()
         assert await answered("m6", 7, "1111", {"convo": []})
-        assert not await answered("m6", 7, "1111", {"convo": []})
+        s._after_answer("m6", item(7), "1111", {"convo": []})   # the third try starts no job
+        assert "m6" not in s.jobs
         assert s.llm.calls - calls == 2 and "m6" not in s.programs, s.llm.calls - calls
         # no learning without a rule-message kind, without a transcript, or at the loop budget reserve
         for label, info in (("unmatched", {"convo": []}), ("phone", {"convo": []}), ("m10", {})):

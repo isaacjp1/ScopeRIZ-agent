@@ -324,7 +324,21 @@ class Solver:
         self.tries = {}      # label -> learning calls made (at most LEARN_TRIES)
 
     def add_message(self, text):
+        """REUSE-04: a new or changed rule message, or a fact or chatter that best matches a kind, discards that kind's
+        stored programs and stops their jobs. The match is taken before the message is added, since a long message
+        would match itself. Over-discarding only costs a relearn."""
+        n = self.rules.kind_for(text)
         self.rules.add(text)
+        if not n:
+            return
+        k = len(self.rules.items)
+        for label in [x for x in {*self.programs, *self.jobs, *self.tries} if x == f"m{n}" or x.startswith(f"m{n}/")]:
+            prog, job = self.programs.pop(label, None), self.jobs.pop(label, None)
+            self.tries.pop(label, None)
+            if job:
+                job.cancel()
+            if prog or job:
+                print(f"[program] {label} discarded: message {k} best matches its rule message {n}", flush=True)
 
     def system_prompt(self, task_text):
         msgs = self.rules.for_task(task_text)
