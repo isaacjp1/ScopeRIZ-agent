@@ -63,17 +63,15 @@ KNOWN_SETS = {1200: 6, 900: 225, 1800: 458, 3600: 924}
 BUDGETS = {1200: 1.0, 900: 8.0, 1800: 15.0, 3600: 25.0}
 BUDGET = _f("BUDGET", BUDGETS.get(int(SHIFT_SECONDS), SHIFT_SECONDS / 3600 * 25))
 LOOP_BUDGET_SHARE = _f("LOOP_BUDGET_SHARE", 0.9)
-# Skip a task at once (no model loop) when earlier tasks like it all ended in a skip and time is short.
-HOPELESS_AFTER = int(_f("HOPELESS_AFTER", 1000))   # off: at 3 it caused 100 of 191 Set 1 skips; task_cap paces time
+# Write a kind off (no model loop, SKIP_SECONDS) after this many skips in a row while time is short. Kinds are now
+# rule-message kinds (REUSE-01) and an answer clears the skip run; the 100 of 191 Set 1 skips at 3 came from the old
+# keyword-signature grouping, which pooled unrelated tasks.
+HOPELESS_AFTER = int(_f("HOPELESS_AFTER", 3))
 TIGHT_FAIR_SECONDS = _f("TIGHT_FAIR_SECONDS", 6)
-# A hopeless kind still gets one longer model-loop try every EXPLORE_EVERY of its tasks, when the time left covers
+# A written-off kind still gets one longer model-loop try every EXPLORE_EVERY of its tasks, when the time left covers
 # the try plus SKIP_SECONDS for each task after it (Set 3 closed every task with time to spare: kinds written off
 # after 3 short tries were never tried again). One success makes the kind normal again, with its route as a hint.
 EXPLORE_EVERY = int(_f("EXPLORE_EVERY", 6))
-# A kind the loop has answered before is worth more time than the fair share: it usually succeeds again (and with
-# the route hint, faster). Given only while the time left covers SKIP_SECONDS for every remaining task.
-KNOWN_KIND_SECONDS = _f("KNOWN_KIND_SECONDS", 10)   # was 28: starved the late kinds (claims, deadlines, estimates)
-KNOWN_KIND_MIN_FAIR = _f("KNOWN_KIND_MIN_FAIR", 6)    # and only while the fair share of the time left is above this
 EXPLORE_SECONDS = _f("EXPLORE_SECONDS", 30)
 SKIP_SECONDS = _f("SKIP_SECONDS", 2)
 
@@ -89,8 +87,11 @@ def expected_tasks():
     return KNOWN_SETS.get(int(SHIFT_SECONDS), max(1, int(SHIFT_SECONDS / 4)))
 
 
-def task_cap(seconds_left, tasks_left):
+def task_cap(seconds_left, tasks_left, written_off=0.0):
     """Seconds this task may take: a multiple of its fair share of the time left, between MIN and TASK_SECONDS.
-    Not reaching a task scores the same as skipping it, so slow tasks must not eat the time of many quick ones."""
-    fair = seconds_left / max(1, tasks_left)
+    Not reaching a task scores the same as skipping it, so slow tasks must not eat the time of many quick ones.
+    The written_off share hands the time written-off kinds free to the tasks that are still tried: that share of the
+    remaining tasks is charged SKIP_SECONDS each, and the rest of the time is shared by the others."""
+    gone = written_off * tasks_left
+    fair = (seconds_left - gone * SKIP_SECONDS) / max(1, tasks_left - gone)
     return max(MIN_TASK_SECONDS, min(TASK_SECONDS, TIME_STRETCH * fair))

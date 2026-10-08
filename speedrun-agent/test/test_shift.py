@@ -125,10 +125,10 @@ SCENARIOS = {
     # always skips the Jones count (i008, plain kind m1): it is written off after 3 tries, the answering kinds never.
     "write-off": {
         "mock": {"MOCK_SHIFT": "90", "MOCK_MESSAGES_ONCE": "1"},
-        "agent": {"TIGHT_FAIR_SECONDS": "1000", "HOPELESS_AFTER": "3"},
+        "agent": {"TIGHT_FAIR_SECONDS": "1000"},
         "browser": True,
         "probes": (0, None),
-        "log": ["[kind] m1 <- message 1", "retrying written-off kind m1 "],
+        "log": ["[kind] m1 <- message 1", "retrying written-off kind m1 ", "kind=m1/new_established known"],
         "not_log": ["[degraded]"],
         "must_answer": ["ESTABLISHED:2025-07-21", "0", "Chronic cough lasting more than eight weeks"],
         "max_wrong": 0,

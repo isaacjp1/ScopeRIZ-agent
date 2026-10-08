@@ -84,8 +84,13 @@ class Memory:
             rec[1] += 1
 
     def allot(self, kind, secs_left, tasks_left):
-        """(mode, seconds) for the next task of this kind. 'written-off' (deterministic paths only) or, on every
-        EXPLORE_EVERY-th written-off task when the time left covers it, 'retry' with the model loop; else 'new'."""
+        """(mode, seconds) for the next task of this kind, checked in this order:
+        - time short (fair share < TIGHT_FAIR_SECONDS) and HOPELESS_AFTER+ skips in a row: 'retry' (EXPLORE_SECONDS,
+          model loop) on every EXPLORE_EVERY-th such task when the time left covers it, else 'written-off'
+          (SKIP_SECONDS, deterministic paths only);
+        - answered before: 'known', the larger of task_cap and task_cap with the written-off share so far (TIME-02);
+        - else 'new', task_cap."""
+        share = self.written_off / self.tasks if self.tasks else 0.0
         self.tasks += 1
         rec = self.kinds.setdefault(kind, [0, 0, 0])
         if secs_left / max(1, tasks_left) < config.TIGHT_FAIR_SECONDS and rec[1] >= config.HOPELESS_AFTER:
@@ -95,4 +100,6 @@ class Memory:
                 return "retry", config.EXPLORE_SECONDS
             self.written_off += 1
             return "written-off", config.SKIP_SECONDS
+        if rec[0] > 0:
+            return "known", max(config.task_cap(secs_left, tasks_left), config.task_cap(secs_left, tasks_left, share))
         return "new", config.task_cap(secs_left, tasks_left)

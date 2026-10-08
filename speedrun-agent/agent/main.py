@@ -32,7 +32,7 @@ def kind_label(rules, text):
 def print_kinds(kinds):
     """Per-kind summary. Printed every 25 tasks too, because the judge may stop the container at time-out and the
     periodic line is what survives in the Set 1 log. The label is the rule-message kind (REUSE-01, kind_label)."""
-    rows = " | ".join(f"{k} {s}/{a}/{n} {secs:.0f}s" for k, (s, a, n, secs) in kinds.items())
+    rows = " | ".join(f"{k} {s}/{a}/{n} {secs:.0f}s w{w}" for k, (s, a, n, secs, w) in kinds.items())
     print(f"[kinds] {rows or '(no tasks)'}", flush=True)
 
 
@@ -65,7 +65,7 @@ async def run():
 
     stats = {"answered": 0, "skipped": 0, "messages": 0, "probe": 0}
     stage, probes_left = None, 0   # DIAG-01: the failed startup stage, decided once ("" = startup OK)
-    kinds = {}   # DIAG-02: label -> [seen, answered, skipped, seconds], in first-seen order
+    kinds = {}   # DIAG-02: label -> [seen, answered, skipped, seconds, written off], in first-seen order
     recorded = set()   # item ids whose outcome moved a kind record: a re-served item never counts twice
     if config.SHIFT_SECONDS == 1200 and os.environ.get("RECON", "1") == "1":
         # Practice only (20 min for 6 tasks): map the app's pages before the queue, since the run stops when it ends.
@@ -110,7 +110,7 @@ async def run():
                 title = solver.rules.items[n - 1].strip().split("\n")[0][:80] if n else ""
                 print(f"[kind] {label} <- message {n}: {title!r}" if n else f"[kind] {label} <- no rule message",
                       flush=True)
-            row = kinds.setdefault(label, [0, 0, 0, 0.0])   # seen, answered, skipped (a probe counts as its skip), secs
+            row = kinds.setdefault(label, [0, 0, 0, 0.0, 0])   # a probe counts as its skip
             # TIME-01: a kind that keeps failing while time is short gets only the deterministic paths, in ~2 s.
             mode, cap = memory.allot(label, secs_left, tasks_left)
             deadline = min(time.time() + cap, shift_end)
@@ -169,6 +169,7 @@ async def run():
             row[0] += 1
             row[1 if kind == "answer" else 2] += 1
             row[3] += time.time() - t0
+            row[4] += mode == "written-off"
             log(f"   left {state.get('seconds_left', 0):.0f}s  spent ${llm.spent:.3f}  {stats}")
             if tasks_seen % 25 == 0:
                 print_kinds(kinds)

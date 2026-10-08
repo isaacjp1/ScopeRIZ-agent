@@ -44,7 +44,7 @@ arena leaderboard
 | AGENT_NOTES | (empty) | Extra tips added to every prompt |
 | BUDGET | per set | Model budget in $ (known sets are detected from SHIFT_SECONDS) |
 | LOOP_BUDGET_SHARE | 0.9 | The model loop stops at this share of BUDGET |
-| HOPELESS_AFTER | 3 | Skip a task right away (when time is short) if this many similar loop tasks were all skipped |
+| HOPELESS_AFTER | 3 | Write a rule-message kind off (2 s, no model loop) when time is short and this many of its tasks in a row were skipped |
 | TIGHT_FAIR_SECONDS | 6 | "Time is short" = fewer seconds than this left per remaining task |
 
 ## Optional: try it on your machine against the practice clinic
