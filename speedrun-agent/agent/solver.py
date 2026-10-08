@@ -5,10 +5,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import clinic, config
-from .fast import Fast
+from .fast import DOB_RE, Fast
 from .llm import BudgetExhausted
 from .rules import Rules
 
@@ -150,9 +151,10 @@ NO_NET = ("import socket\n"
 
 
 def run_python(code, pages, timeout=6):
-    pages_file = os.path.join(config.WORK_DIR, "pages.json")
-    with open(pages_file, "w") as f:
-        json.dump(pages, f)
+    # A file per call: background stored-program runs and the loop's python tool can overlap (REUSE-02).
+    fd, pages_file = tempfile.mkstemp(suffix=".json", dir=config.WORK_DIR)
+    with os.fdopen(fd, "w") as f:
+        json.dump(pages, f, default=str)
     prelude = ("import json, re, math, datetime\nfrom datetime import date, timedelta\n"
                f"PAGES = json.load(open({pages_file!r}))\n")
     try:
@@ -163,6 +165,8 @@ def run_python(code, pages, timeout=6):
         out = (r.stdout + ("\nSTDERR: " + r.stderr[-1500:] if r.returncode else ""))
     except subprocess.TimeoutExpired:
         out = "timeout"
+    finally:
+        os.remove(pages_file)
     return out[:4000] or "(no output)"
 
 
@@ -200,6 +204,80 @@ def plausible(task, answer):
     if re.search(r"\bwhat\b[^?]{0,30}\bphone\b", t) and not isinstance(answer, list):
         return len(re.sub(r"\D", "", s)) in (10, 11)
     return True
+
+
+def checked_answer(task, value):
+    """REUSE-03: the format and plausibility gate a stored program's answer passes before it is sent. Format: after
+    clean_answer, a non-empty one-line string of at most 200 characters, a number, or a list of 1-50 such items.
+    Returns (value, "") or (None, why)."""
+    v = clean_answer(value)
+    items = v if isinstance(v, list) else [v]
+    if v is None or v == "" or v == [] or len(items) > 50 or any(
+            isinstance(x, str) and ("\n" in x or len(x) > 200) for x in items):
+        return None, f"bad format {value!r}"[:150]
+    if not plausible(task, v):
+        return None, f"implausible answer {v!r}"[:150]
+    return v, ""
+
+
+def same_answer(a, b):
+    """The judge's text comparison for message-defined answer forms: case, whitespace runs and the spaces around ':'
+    and ',' do not matter. A list compares as its sorted items; a list never equals a non-list. Numbers compare by
+    their text, so 12 equals "12" and "12.5" does not equal "12.50"."""
+    def key(x):
+        return re.sub(r"\s*([:,])\s*", r"\1", re.sub(r"\s+", " ", str(x).strip().lower()))
+    if isinstance(a, list) or isinstance(b, list):
+        return isinstance(a, list) and isinstance(b, list) and sorted(map(key, a)) == sorted(map(key, b))
+    return key(a) == key(b)
+
+
+# REUSE-02: one model call per kind writes a program from a loop-solved task; filled in one pass by _learn.
+LEARN = """Write a Python program that answers one kind of clinic request from the Wrenfield records system, so that \
+later requests of this kind are answered without a model.
+
+Requests of this kind are phrased in many ways and name other patients, dates, providers and amounts. Below are the \
+clinic messages (the rule for this kind), one request an assistant solved, the answer it sent, the patients list for \
+that request, the assistant's transcript and samples of the page data it read.
+
+CLINIC MESSAGES:
+{rules}
+
+SOLVED REQUEST:
+{task}
+
+ANSWER SENT: {answer}
+
+PATIENTS LIST FOR THAT REQUEST:
+{patients}
+
+TRANSCRIPT:
+{transcript}
+
+PAGE DATA SAMPLES (what pages[...] holds for a site path):
+{pages}
+
+THE PROGRAM
+Define step(task, pages, patients). It is called again after each "open", with the pages it asked for added, at most \
+{steps} calls in all. Return ONE dict:
+- {"open": ["/site/path?x=y", "doc:/documents/<id>", ...]}: read these pages. pages[request] then holds each page, \
+keyed by the exact string you asked for. "doc:<document page path>" reads that document's file text into \
+pages["doc:<document page path>"]["text"].
+- {"answer": value}: the answer, in exactly the answer form the messages give (a string, a number, or a list of \
+strings for list questions).
+- {"skip": "why"}: when the request is not this kind, an input is missing or ambiguous, or the pages do not clearly \
+give the answer.
+A wrong answer costs a point and a skip costs nothing, so skip whenever in doubt.
+
+A page is a dict {"path", "title", "text", "tables": [{"headers": [...], "rows": [{"cells": [...], "links": [[text, \
+href], ...]}]}], "links": [[text, href], ...]}, or {"path", "error"} when it did not load. patients is a list of \
+{"name": "Last, First", "mrn", "dob", "flags": [...], "path": "/patients/<id>"}: the charts born on the request's date \
+of birth, or [] when it gives none. flags may hold Merged, Deleted, Restricted or Test record.
+
+Read every name, date, id and amount from task and the pages; never copy one from the solved request. Follow the \
+same pages and checks the assistant used. Only json, re, math and datetime are available (already imported), with \
+no network, no files and no printing.
+
+Reply with the program only, in one python code block."""
 
 
 PROBE_CODES = {"location": 1, "search": 2, "sign-in": 3}
@@ -241,6 +319,9 @@ class Solver:
         self.memory = memory
         self.rules = Rules(llm)      # clinic messages, in order
         self.fast = Fast(site, llm, self.rules)
+        self.programs = {}   # REUSE-02: label -> {"code", "answer" (its example's), "task", "confirmed"}
+        self.jobs = {}       # label -> the asyncio task learning or checking that label's program
+        self.tries = {}      # label -> learning calls made (at most LEARN_TRIES)
 
     def add_message(self, text):
         self.rules.add(text)
@@ -274,9 +355,163 @@ class Solver:
         lines = [f"- {r['name']} | MRN {r['mrn']} | DOB {r['dob']} | {' '.join(r['flags']) or '-'} -> {r['path']}" for r in rows[:15]]
         return f"Prefetched: patients born {m.group(1)} (all locations):\n" + "\n".join(lines)
 
-    async def solve(self, task_text, deadline, allow_loop=True):
-        """Returns (kind, value, info). kind is 'answer' or 'skip'. Known kinds go the deterministic way first;
-        the model loop gets whatever time is left."""
+    async def _patients(self, task_text):
+        """A stored program's patients input: find_patient matches for the task's date of birth, [] for none."""
+        m = DOB_RE.search(task_text)
+        try:
+            d = clinic.parse_any_date(m.group(1)) if m else None
+            if not d:
+                return []
+            return (await clinic.find_patient(self.site, dob=d.isoformat())).get("matches") or []
+        except Exception:
+            return []
+
+    async def run_program(self, code, task_text, deadline):
+        """Runs a stored program (REUSE-02) -> (value or None, why, route). Its text runs only in run_python (no
+        secrets, sockets blocked), and it acts on the clinic only by reading pages (Site.read_many) and document text
+        (Site.read_document): no clicks, forms or POSTs."""
+        patients = await self._patients(task_text)
+        driver = (f"\n_r = step(json.loads({json.dumps(task_text)!r}), PAGES, "
+                  f"json.loads({json.dumps(patients, default=str)!r}))\nprint('RESULT:' + json.dumps(_r, default=str))\n")
+        pages, route = {}, []
+        for _ in range(config.PROGRAM_STEPS):
+            left = deadline - time.time()
+            if left < 0.5:
+                return None, "time", route
+            out = await asyncio.to_thread(run_python, code + driver, pages, max(0.5, min(6, left)))
+            lines = [ln for ln in out.splitlines() if ln.startswith("RESULT:")]
+            try:
+                res = json.loads(lines[-1][len("RESULT:"):]) if lines else None
+            except ValueError:
+                res = None
+            if not isinstance(res, dict):
+                return None, "program failed: " + out[-150:], route
+            if res.get("answer") is not None:
+                return res["answer"], "", route
+            if "open" in res:
+                asked = res["open"] if isinstance(res["open"], list) else []
+                want = [r for r in asked if isinstance(r, str) and r not in pages][:8]
+                if not want:
+                    return None, "program asked for nothing new", route
+                docs = [r for r in want if r.startswith("doc:")]
+                paths = [r for r in want if not r.startswith("doc:")]
+                got = await asyncio.gather(self.site.read_many(paths),
+                                           *[self.site.read_document(r[len("doc:"):]) for r in docs])
+                pages.update(zip(paths, got[0]))
+                pages.update(zip(docs, got[1:]))
+                route += want
+                continue
+            if "skip" in res:
+                return None, "program skipped: " + str(res["skip"])[:100], route
+            return None, "program gave no open, answer or skip", route
+        return None, f"program used all {config.PROGRAM_STEPS} steps", route
+
+    def _after_answer(self, label, task_text, value, info):
+        """A model-loop answer starts a job for its kind label (REUSE-02): learning when the label has no program,
+        checking when its program is unconfirmed. Only rule-message kinds ("m<N>", "m<N>/<path>"): "unmatched" and bare
+        path names pool unrelated requests."""
+        if not re.match(r"^m\d+(/|$)", label or "") or label in self.jobs:
+            return
+        prog = self.programs.get(label)
+        if prog is None:
+            if "convo" not in info or self.tries.get(label, 0) >= config.LEARN_TRIES \
+                    or self.llm.spent >= config.BUDGET * config.LOOP_BUDGET_SHARE:
+                return
+            self.tries[label] = self.tries.get(label, 0) + 1
+            job = self._learn(label, task_text, value, info)
+        elif not prog["confirmed"]:
+            job = self._check(label, task_text, value)
+        else:
+            return
+        self.jobs[label] = asyncio.create_task(job)
+
+    async def _learn(self, label, task_text, value, info):
+        """One model call writes a program from this loop-solved task. It is kept, unconfirmed, only if it gives the
+        loop's answer on this same task."""
+        why = ""
+        try:
+            parts = []
+            for m in info["convo"][1:]:
+                if m.get("tool_calls"):
+                    s = "assistant: " + " ; ".join(f"{c['function']['name']}({c['function'].get('arguments', '')})"
+                                                   for c in m["tool_calls"])
+                else:
+                    s = f"{m['role']}: {m.get('content')}"
+                parts.append(s[:1500])
+            cache, samples = getattr(self.site, "cache", {}), []
+            for r in info.get("route", []):
+                p = cache.get(r) if isinstance(r, str) and r.startswith("/") else None
+                if isinstance(p, dict):
+                    samples.append({"path": r, "title": p.get("title"), "text": (p.get("text") or "")[:1500],
+                                    "tables": [{"headers": t.get("headers"), "rows": (t.get("rows") or [])[:5]}
+                                               for t in (p.get("tables") or [])[:3]],
+                                    "links": (p.get("links") or [])[:15]})
+            vals = {"rules": self.rules.for_task(task_text), "task": task_text, "answer": json.dumps(value),
+                    "patients": json.dumps(await self._patients(task_text), default=str),
+                    "transcript": "\n".join(parts)[:12000], "pages": json.dumps(samples, default=str)[:12000],
+                    "steps": str(config.PROGRAM_STEPS)}
+            # one pass, so a placeholder written inside a message or a page is never filled in
+            prompt = re.sub(r"\{(rules|task|answer|patients|transcript|pages|steps)\}", lambda x: vals[x.group(1)], LEARN)
+            msg, _, _ = await self.llm.chat([{"role": "user", "content": prompt}], max_tokens=6000, timeout=90)
+            text = msg.get("content") or ""
+            block = re.search(r"```(?:python)?[ \t]*\n(.*?)```", text, re.S)
+            code = block.group(1) if block else text
+            t1 = time.time()
+            if msg.get("_finish") == "length":
+                why = "the reply was cut off"
+            elif "def step(" not in code:
+                why = "no step() in the reply"
+            else:
+                got, why, route = await self.run_program(code, task_text, time.time() + 30)
+                if got is not None:
+                    got, why = checked_answer(task_text, got)
+                if got is not None and not same_answer(got, value):
+                    why = f"it gave {got!r} where the model loop answered {value!r}"
+                elif got is not None:
+                    self.programs[label] = {"code": code, "answer": value, "task": task_text, "confirmed": False}
+                    print(f"[program] {label} learned from {task_text[:80]!r}: reproduces {value!r} in "
+                          f"{time.time() - t1:.1f}s, {len(route)} request(s)", flush=True)
+                    return
+        except Exception as e:   # asyncio.CancelledError is not an Exception: a discarding message still cancels
+            why = f"{e!r}"
+        finally:
+            if self.jobs.get(label) is asyncio.current_task():
+                del self.jobs[label]
+        print(f"[program] {label} not learned: {why[:200]}", flush=True)
+
+    async def _check(self, label, task_text, value):
+        """Runs an unconfirmed program on a later loop answer of its kind. It is confirmed when it gives the loop's
+        answer and that answer differs from its example's, which a program hard-coding its example cannot do."""
+        # limit: a confirmed program that keeps falling back on one phrasing costs its run time on every such task;
+        # relearn from the loop answer after a fallback if the Set 1 log shows many fallback lines.
+        try:
+            prog = self.programs.get(label)
+            if not prog:
+                return
+            got, why, _ = await self.run_program(prog["code"], task_text, time.time() + 20)
+            if got is not None:
+                got, why = checked_answer(task_text, got)
+            if got is None:
+                print(f"[program] {label} not checked on {task_text[:60]!r}: {why}"[:300], flush=True)
+            elif same_answer(got, value) and not same_answer(got, prog["answer"]):
+                prog["confirmed"] = True
+                print(f"[program] {label} confirmed on {task_text[:80]!r}: {got!r} agrees with the model loop", flush=True)
+            elif same_answer(got, value):
+                print(f"[program] {label} agrees on {task_text[:60]!r} but with the example's own answer: "
+                      "not confirmed yet", flush=True)
+            else:
+                self.programs.pop(label, None)
+                print(f"[program] {label} discarded: it gave {got!r} where the model loop answered {value!r}"[:300],
+                      flush=True)
+        except Exception as e:
+            print(f"[program] {label} not checked on {task_text[:60]!r}: {e!r}"[:300], flush=True)
+        finally:
+            if self.jobs.get(label) is asyncio.current_task():
+                del self.jobs[label]
+
+    async def solve(self, task_text, deadline, allow_loop=True, label=""):
+        """Returns (kind, value, info). kind is 'answer' or 'skip'. Known kinds go the deterministic way first, then
+        the kind label's confirmed stored program (REUSE-03); the model loop gets whatever time is left."""
         t0 = time.time()
         try:
             res = await asyncio.wait_for(self.fast.solve(task_text), max(1.0, deadline - time.time() - 1))
@@ -288,6 +523,16 @@ class Solver:
         if res:
             res[2]["secs"] = round(time.time() - t0, 1)
             return confidence_gate(*res)
+        prog = self.programs.get(label)
+        if prog and prog["confirmed"]:
+            value, why, route = await self.run_program(prog["code"], task_text, deadline)
+            if value is not None:
+                value, why = checked_answer(task_text, value)
+            if value is not None:
+                return confidence_gate("answer", value, {"why": f"stored program {label}", "conf": 1.0,
+                                                         "route": ["program:" + label] + route,
+                                                         "secs": round(time.time() - t0, 1)})
+            print(f"[program] {label} fallback to the model loop: {why}"[:300], flush=True)
         if not allow_loop:
             return "skip", None, {"why": "loop not allowed (hopeless kind, time short)", "route": []}
         if self.llm.spent >= config.BUDGET * config.LOOP_BUDGET_SHARE:
@@ -295,7 +540,10 @@ class Solver:
         kind, value, info = await self._loop(task_text, deadline)
         if kind == "answer" and not plausible(task_text, value):
             kind, info = "skip", {**info, "why": f"implausible answer {value!r}"[:150]}
-        return confidence_gate(kind, value, info)
+        res = confidence_gate(kind, value, info)
+        if res[0] == "answer":
+            self._after_answer(label, task_text, res[1], info)
+        return res
 
     async def _loop(self, task_text, deadline):
         t0 = time.time()
@@ -347,7 +595,7 @@ class Solver:
                         return "skip", None, {**info, "why": "empty"}
                     if conf < config.MIN_CONFIDENCE:
                         return "skip", ans, {**info, "why": f"low confidence {conf}"}
-                    return "answer", ans, info
+                    return "answer", ans, {**info, "convo": convo}   # the learning prompt is built from it
                 if name == "skip_task":
                     return "skip", None, {"why": str(args.get("reason"))[:150], "route": route, "turns": turn + 1}
                 if name == "open_pages":

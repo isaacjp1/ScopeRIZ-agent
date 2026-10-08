@@ -74,6 +74,11 @@ TIGHT_FAIR_SECONDS = _f("TIGHT_FAIR_SECONDS", 6)
 EXPLORE_EVERY = int(_f("EXPLORE_EVERY", 6))
 EXPLORE_SECONDS = _f("EXPLORE_SECONDS", 30)
 SKIP_SECONDS = _f("SKIP_SECONDS", 2)
+# REUSE-02: step() calls in one stored-program run. Each call may ask for pages (search, chart, tab, answer).
+PROGRAM_STEPS = int(_f("PROGRAM_STEPS", 4))
+# REUSE-02: model calls that write a stored program, per kind label. Each is about one strong-model turn with a long
+# prompt (rule, transcript, page samples); 0 turns learning off (the Phase 3 behaviour).
+LEARN_TRIES = int(_f("LEARN_TRIES", 2))
 
 
 def require_urls():

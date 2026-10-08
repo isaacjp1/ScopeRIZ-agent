@@ -361,6 +361,27 @@ ITEMS = [
     {"id": "i008", "kind": "task", "text": "How many patients with the last name Jones can you see?", "expected": "x"},
     {"id": "i009", "kind": "task", "text": "How many open slots are there for Logan Brown, MD at Northgate on 2026-10-14?", "expected": "0"},
 ]
+if os.environ.get("MOCK_LEARN"):   # REUSE-02: one more loop kind (label m1), learned as a stored program
+    ITEMS += [
+        {"id": "i010", "kind": "task", "text": "What is the MRN of patient Gregory Porter (born 1976-04-08)?", "expected": P["gp"]["mrn"]},
+        {"id": "i011", "kind": "task", "text": "What is the MRN of patient Judith Jackson (born 2004-11-12)?", "expected": P["jj"]["mrn"]},
+    ]
+# The fake model cannot write code, so it answers the learning prompt with this canned program: the scenario proves
+# the plumbing (learn, replay, confirm, run before the loop), not the model's programming.
+MRN_PROGRAM = """def step(task, pages, patients):
+    m = re.search(r"MRN of patient (\\w+) (\\w+) \\(born", task)
+    if not m:
+        return {"skip": "not an MRN request"}
+    want = (m.group(2) + ", " + m.group(1)).lower()
+    hits = [p for p in patients if p["name"].lower() == want]
+    if len(hits) != 1:
+        return {"skip": "%d charts match" % len(hits)}
+    path = hits[0]["path"]
+    if path not in pages:
+        return {"open": [path]}
+    v = re.search(r"MRN\\W*(HG\\d{7})", pages[path].get("text") or "")
+    return {"answer": v.group(1)} if v else {"skip": "no MRN on the chart"}
+"""
 QSTATE = {"i": 0, "log": [], "t0": None}
 
 
@@ -475,6 +496,10 @@ class L(BaseHTTPRequestHandler):
             first = next((c.get("text", "") for c in first if c.get("type") == "text"), "")
             if not first.startswith("Answer the question using ONLY the document"):
                 return say({"phone": P[LAST_CHART[0]]["phone"], "email": "", "address": ""})
+        if first.startswith("Write a Python program"):
+            return self._json(200, {"choices": [{"message": {"role": "assistant",
+                                                             "content": "```python\n" + MRN_PROGRAM + "```"}}],
+                                    "usage": {"cost": 0.0005}})
         if first.startswith("The clinic messages below"):
             excl = re.search(r"never make a patient established: ([^.]+)\.", first).group(1).split(", ")
             return say({"years": 3, "counting_statuses": ["Completed"], "excluded_services": excl,
@@ -524,6 +549,11 @@ class L(BaseHTTPRequestHandler):
                 return call("read_document", {"path": d.group(1)})
             m = re.search(r"Reason for referral: ([^\n]+)", json.loads(last).get("text", ""))
             return call("submit_answer", {"answer": m.group(1).strip(), "confidence": 0.9}) if m else call("skip_task", {"reason": "no reason"})
+        if "MRN" in task:
+            if n == 0:
+                return call("open_pages", {"paths": paths[:1]})
+            v = re.search(r"MRN\W*(HG\d{7})", last)
+            return call("submit_answer", {"answer": v.group(1), "confidence": 0.95}) if v else call("skip_task", {"reason": "no MRN"})
         if "Jones" in task:
             if n == 0:
                 return call("open_pages", {"paths": ["/patients?lastName=Jones"]})

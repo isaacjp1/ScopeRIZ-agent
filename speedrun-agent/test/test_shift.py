@@ -133,6 +133,20 @@ SCENARIOS = {
         "must_answer": ["ESTABLISHED:2025-07-21", "0", "Chronic cough lasting more than eight weeks"],
         "max_wrong": 0,
     },
+    # REUSE-02/03/05: the MRN kind (label m1, a loop kind) is learned from its first loop answer, confirmed on the
+    # second MRN task (a different MRN), then answered by the stored program. The Jones task shares label m1 and the
+    # program skips it, so it falls back to the loop.
+    "learn": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_MESSAGES_ONCE": "1", "MOCK_LEARN": "1"},
+        "agent": {},
+        "browser": True,
+        "probes": (0, None),
+        "log": ["[program] m1 learned from ", "[program] m1 confirmed on ", "| stored program m1 ",
+                "[program] m1 fallback to the model loop: "],
+        "not_log": ["[degraded]"],
+        "must_answer": ["ESTABLISHED:2025-07-21", "Chronic cough lasting more than eight weeks"],
+        "max_wrong": 0,
+    },
     "sign-in": {
         "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_LOGIN": "1"},
         "agent": {},
@@ -146,6 +160,8 @@ TASK_LINE = re.compile(r"^\[agent\] \S+ (?:SKIP|ANSWER) .* in (\d+(?:\.\d+)?)s \
 # seconds, kind label, mode of a per-task line
 KIND_LINE = re.compile(r"^\[agent\] \S+ (?:SKIP|ANSWER) .* in (\d+(?:\.\d+)?)s \| .* kind=(\S+) (\S+) cap=\d+s \| task:",
                        re.M)
+# item id, seconds and kind label of a per-task line answered by a stored program (REUSE-03)
+PROGRAM_LINE = re.compile(r"^\[agent\] (\S+) ANSWER .* in (\d+(?:\.\d+)?)s \| stored program (\S+) conf=", re.M)
 
 
 def run(name, sc):
@@ -208,6 +224,17 @@ def run(name, sc):
         first = rows.index(off[0])
         tries = [r for r in rows[:first] if r[1] == "m1" and r[2] == "new"]
         assert len(tries) >= 3, f"{len(tries)} new m1 tries before the write-off\n{tail}"
+    if name == "learn":
+        progs = PROGRAM_LINE.findall(out)
+        secs = [float(sec) for _, sec, _ in progs]
+        assert len(progs) >= 3, f"{len(progs)} stored-program answers\n{tail}"
+        assert max(secs) <= 4.0 and sum(secs) / len(secs) <= 4.0, f"stored-program answer seconds {secs}\n{tail}"
+        assert out.index("| stored program m1 ") > out.index("[program] m1 confirmed on "), tail
+        by_id = {c["id"]: c for c in closes}
+        bad = [(i, by_id.get(i)) for i, _, _ in progs if not by_id.get(i) or by_id[i].get("answer") != by_id[i]["expected"]]
+        assert not bad, f"stored-program answers not correct: {bad}\n{tail}"
+        mrns = {c["expected"] for c in closes if str(c.get("expected", "")).startswith("HG") and c.get("answer") == c["expected"]}
+        assert len(mrns) == 2, f"MRN values answered correctly: {sorted(mrns)}\n{tail}"
     if name == "dead-site":
         assert "[kinds] " in out, tail
         assert "[probe] startup stage=sign-in" in out, tail

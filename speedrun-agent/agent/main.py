@@ -125,7 +125,7 @@ async def run():
                 kind, value, info = "skip", None, {"why": "site not ready"}
             else:
                 try:   # with the model budget gone, the deterministic paths that need no model still answer
-                    kind, value, info = await solver.solve(item["text"], deadline, allow_loop=allow_loop)
+                    kind, value, info = await solver.solve(item["text"], deadline, allow_loop=allow_loop, label=label)
                 except BudgetExhausted:
                     kind, value, info = "skip", None, {"why": "budget"}
                 except Exception as e:
