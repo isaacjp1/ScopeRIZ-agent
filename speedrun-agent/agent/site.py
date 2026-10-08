@@ -185,6 +185,51 @@ def same_origin(url):
         return False
 
 
+# Sidebar label (lower case) -> the path the practice clinic uses for that section. The agent's code and notes.md are
+# written against these paths; Site translates them to this clinic's paths at the browser (ROB-02).
+SECTIONS = {"patients": "/patients", "schedule": "/schedule", "billing": "/billing", "documents": "/documents"}
+
+
+def learn_routes(links):
+    """{practice section path: this clinic's path} from the navigation links labelled Patients, Schedule, Billing,
+    Documents; the first link per label wins."""
+    # limit: exact sidebar labels only; add synonyms ("Charts", "Calendar") if a Set 1 log shows a clinic without them
+    routes = {}
+    for label, href in links:
+        practice = SECTIONS.get(" ".join((label or "").split()).lower())
+        if not practice or practice in routes or not href:
+            continue
+        if href.startswith("http"):
+            if not same_origin(href):   # Rule 1: never learn a route that leaves SITE_URL
+                continue
+            href = urlsplit(href).path
+        elif not href.startswith("/") or href.startswith("//"):
+            continue
+        path = re.split(r"[?#]", href, maxsplit=1)[0].rstrip("/")
+        if path:   # the root is not a section
+            routes[practice] = path
+    return routes
+
+
+# limit: only the four section roots are translated; sub-paths (chart tabs, /schedule/providers,
+# /schedule/appointments) keep their practice names until a version that renames them shows up in a Set 1 log
+def _swap(path, pairs):
+    for a, b in pairs:
+        if path == a or path.startswith(a + "/") or path.startswith(a + "?"):
+            return b + path[len(a):]
+    return path
+
+
+def to_site(path, routes):
+    """A practice path rewritten to this clinic's path (unchanged outside the learned sections)."""
+    return _swap(path, routes.items())
+
+
+def from_site(href, routes):
+    """A path of this clinic rewritten to the practice path the agent's code expects."""
+    return _swap(href, [(real, practice) for practice, real in routes.items()])
+
+
 class Site:
     def __init__(self):
         self.pw = None
@@ -194,6 +239,7 @@ class Site:
         self.cache = {}           # path -> rendered dict
         self.cache_t = {}         # path -> when it was read: the clinic's data changes during the shift
         self.nav_links = set()    # hrefs that appear on every page (sidebar): hidden from the model
+        self.routes = {}          # practice section path -> this clinic's path, learned from the sidebar at startup; empty = practice paths
         self.ready = asyncio.Event()
         self.error = None
         self.inflight = {}        # page -> number of requests in flight
@@ -557,7 +603,17 @@ class Site:
         try:
             await page.goto(config.SITE_URL + "/", wait_until="commit")
             await self._wait_content(page)
+            self.routes = {}   # a startup retry: _extract below must not map, so the one _map_links here is the only pass
             data = await self._extract(page)
+            # _extract reads only the content frames; the sidebar that names the sections lives in the shell
+            try:
+                shell = (await page.main_frame.evaluate(EXTRACT_JS) or {}).get("links", [])
+            except Exception:
+                shell = []
+            data["links"] = [l for l in shell if l not in data["links"]] + data["links"]
+            self.routes = learn_routes(data["links"])
+            self._map_links(data)
+            print(f"[site] routes from navigation: {self.routes}", flush=True)
             m = re.search(r"\b([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})\b", data["text"])
             if m:
                 self.today = m.group(1)
@@ -628,7 +684,17 @@ class Site:
                     out["links"].append(l)
             for k in ("forms", "selects", "media", "files", "tables"):
                 out[k] += d.get(k, [])
+        self._map_links(out)
         return out
+
+    def _map_links(self, data):
+        """Links and table-row links in the practice vocabulary, so solver regexes such as '^/patients/' match."""
+        if not self.routes:
+            return
+        data["links"] = [[t, from_site(h, self.routes)] for t, h in data["links"]]
+        for t in data["tables"]:
+            for r in t["rows"]:
+                r["links"] = [[x, from_site(h, self.routes)] for x, h in r["links"]]
 
     def _normalize(self, path):
         path = (path or "/").strip()
@@ -654,7 +720,7 @@ class Site:
                     if self.login_lock.locked():   # a re-login is running: wait, so nothing is read from the old session
                         async with self.login_lock:
                             pass
-                    await page.goto(config.SITE_URL + path, wait_until="commit")
+                    await page.goto(config.SITE_URL + to_site(path, self.routes), wait_until="commit")
                     # A sparse sign-in page never counts as content, so waiting first spent 4 x NAV_TIMEOUT per read
                     # before the sign-in check below: signed-out reads never returned within a task (Plan 01-03).
                     if not self._is_login_page({}, page.url) and not await self._wait_content(page):
@@ -839,7 +905,7 @@ class Site:
         page = await self.pages.get()
         shots = []
         try:
-            await page.goto(config.SITE_URL + path, wait_until="commit")
+            await page.goto(config.SITE_URL + to_site(path, self.routes), wait_until="commit")
             await self._wait_content(page)
             await asyncio.sleep(0.3)  # let images decode
             els = []
@@ -873,7 +939,7 @@ class Site:
         page = await self.pages.get()
         try:
             await page.set_viewport_size({"width": 1400, "height": height})
-            await page.goto(config.SITE_URL + path, wait_until="commit")
+            await page.goto(config.SITE_URL + to_site(path, self.routes), wait_until="commit")
             await self._wait_content(page)
             await asyncio.sleep(0.4)  # let web fonts paint (digits are drawn by the page's font)
             cdp = await page.context.new_cdp_session(page)

@@ -77,6 +77,30 @@ PROVIDERS.append(("pr7", "Elena Gutierrez, NP", "Family Medicine", True))
 LAST_CHART = ["cj1"]  # chart shown last (the mock vision model "reads" its phone)
 CALLS = []           # first 60 chars of every model request, for checking how many calls a run made
 SESS = {}  # cookie sid -> {"loc": ..., "size": 5, "page": {key: n}}
+# MOCK_PATHS=renamed: another Wrenfield version whose section paths differ from the practice clinic's (ROB-02)
+RENAMED = {"/patients": "/people", "/schedule": "/calendar", "/billing": "/invoices",
+           "/documents": "/records"} if os.environ.get("MOCK_PATHS") == "renamed" else {}
+SERVED = []          # every content path asked for through /data, as the browser sent it
+
+
+def _at(p, prefix):
+    return p == prefix or p.startswith(prefix + "/") or p.startswith(prefix + "?")
+
+
+def practice_path(p):
+    """The path content() understands: under RENAMED a practice path is unknown, a renamed one maps back."""
+    if any(_at(p, a) for a in RENAMED):
+        return "/not-here" + p
+    for a, b in RENAMED.items():
+        if _at(p, b):
+            return a + p[len(b):]
+    return p
+
+
+def renamed_html(h):
+    for a, b in RENAMED.items():
+        h = h.replace(f'href="{a}', f'href="{b}')
+    return h
 
 
 def sess(h):
@@ -114,7 +138,7 @@ def shell(s):
     return f"""<!doctype html><html><head><title>Wrenfield</title><style>#menu{{display:none}} #menu.open{{display:block}}
 iframe{{width:1200px;height:900px;border:0}}</style></head><body>
 <a href="#main">Skip to main content</a><img src="http://blocked.example/x.png" alt="">
-<nav><a href="/">Dashboard</a> <a href="/patients">Patients</a> <a href="/schedule">Schedule</a> <a href="/documents">Documents</a></nav>
+<nav><a href="/">Dashboard</a> <a href="/patients">Patients</a> <a href="/schedule">Schedule</a> <a href="/billing">Billing</a> <a href="/documents">Documents</a></nav>
 <header><div role="button" aria-haspopup="true" onclick="document.getElementById('menu').classList.toggle('open')">
 <span>Location</span><br><span>{label}</span></div>
 <div id="menu"><div>Work at location</div>{opts}</div> Harbor Glen Medical Group · Wrenfield 4.2.0</header>
@@ -286,14 +310,15 @@ class Site(BaseHTTPRequestHandler):
             return self._send(200, FRAME)
         if self.path.startswith("/data"):
             p = unquote(parse_qs(urlparse(self.path).query)["p"][0])
-            return self._send(200, content(s, p))
+            SERVED.append(p)
+            return self._send(200, renamed_html(content(s, practice_path(p))))
         m = re.match(r"^/files/(\w+)\.(pdf|png)$", self.path)
         if m:
             d = next(d for p in P.values() for d in p["docs"] if d["id"] == m.group(1))
             if m.group(2) == "pdf":
                 return self._send(200, make_pdf(d["body"]), "application/pdf")
             return self._send(404, "")
-        return self._send(200, shell(s))
+        return self._send(200, renamed_html(shell(s)))
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -389,6 +414,8 @@ class Q(BaseHTTPRequestHandler):
             return self._json(200, CALLS)
         if self.path == "/log":
             return self._json(200, QSTATE["log"])
+        if self.path == "/served":
+            return self._json(200, SERVED)
         self._json(404, {"error": {"code": "not_found"}})
 
     def do_POST(self):

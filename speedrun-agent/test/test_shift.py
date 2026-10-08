@@ -21,7 +21,9 @@ sys.path.insert(0, ROOT)
 # name -> mock: MOCK_* env for the mock; agent: env overrides for the agent; browser: needs Playwright;
 # probes: None, or (count, value) expected among the answers that start "PROBE-".
 # Optional: log / not_log: strings that must / must not appear in the agent output; correct: minimum correct non-probe
-# answers; must_answer: answers that must be among the correct ones; max_wrong: most non-probe answers allowed wrong.
+# answers; must_answer: answers that must be among the correct ones; max_wrong: most non-probe answers allowed wrong;
+# served: path prefixes that must each start at least one content path the mock served; not_served: practice section
+# paths that no served path may equal or continue with "/" or "?".
 SCENARIOS = {
     # Queue down from second 15 to 30, model listing 20 s late, sign-in 15 s late. MODEL is unset so listing runs, and
     # MODEL_PREFS=fake makes it pick the mock's model (an anthropic/ id would break the scripted fake model).
@@ -91,6 +93,19 @@ SCENARIOS = {
         "not_log": ["[degraded]"],
         "correct": 1,
     },
+    # Another Wrenfield version: every section path renamed (MOCK_PATHS=renamed). Routes come from the sidebar (ROB-02).
+    "renamed": {
+        "mock": {"MOCK_SHIFT": "90", "MOCK_PATHS": "renamed"},
+        "agent": {},
+        "browser": True,
+        "probes": (0, None),
+        "log": ["'/patients': '/people'", "'/schedule': '/calendar'", "'/billing': '/invoices'",
+                "'/documents': '/records'", "[probe] startup stage=ok"],
+        "not_log": ["[degraded]"],
+        "must_answer": ["0", "Chronic cough lasting more than eight weeks", "ESTABLISHED:2025-07-21"],
+        "served": ["/people?", "/people/", "/calendar", "/records/"],
+        "not_served": ["/patients", "/schedule", "/billing", "/documents"],
+    },
     "sign-in": {
         "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_LOGIN": "1"},
         "agent": {},
@@ -126,6 +141,9 @@ def run(name, sc):
                            timeout=shift + 120)
         wall = time.time() - t0
         closes = json.load(urllib.request.urlopen("http://127.0.0.1:8812/log", timeout=10))
+        served = []
+        if "served" in sc or "not_served" in sc:   # older mocks have no /served
+            served = json.load(urllib.request.urlopen("http://127.0.0.1:8812/served", timeout=10))
     finally:
         mock.terminate()
         mock.wait(10)
@@ -161,6 +179,12 @@ def run(name, sc):
         assert want in out, f"missing {want!r} in the output\n{tail}"
     for bad in sc.get("not_log", []):
         assert bad not in out, f"unexpected {bad!r} in the output\n{tail}"
+    for want in sc.get("served", []):
+        assert any(p.startswith(want) for p in served), \
+            f"no served path starts {want!r} (served: {sorted(set(served))[:40]})\n{tail}"
+    for bad in sc.get("not_served", []):
+        hit = [p for p in served if p == bad or p.startswith(bad + "/") or p.startswith(bad + "?")]
+        assert not hit, f"practice path served: {hit[:10]}\n{tail}"
     answers = [c for c in closes if "answer" in c and not str(c["answer"]).startswith("PROBE-")]
     right = [str(c["answer"]) for c in answers if str(c["answer"]) == str(c.get("expected"))]
     wrong = [(c["answer"], c.get("expected")) for c in answers if str(c["answer"]) != str(c.get("expected"))]
@@ -173,7 +197,7 @@ def run(name, sc):
           f"correct={len(right)} wrong={len(wrong)}", flush=True)
     # echoed for Plan 03's record (routing cost, RESEARCH Pitfall 1)
     lines = out.splitlines()
-    for tag in ("[site] ready in", "[probe] startup", "[kinds] ", "[degraded]"):
+    for tag in ("[site] ready in", "[site] routes", "[probe] startup", "[kinds] ", "[degraded]"):
         hit = [ln for ln in lines if ln.startswith(tag)]
         if hit:
             print(f"   {hit[-1][:200]}", flush=True)
