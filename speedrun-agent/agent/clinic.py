@@ -135,6 +135,17 @@ async def find_patient(site, last_name=None, first_name=None, dob=None):
     if d and sp.get("dob"):
         path = f"/patients?{sp['dob']}={d.isoformat()}"
         data = await site.read(path)
+        # DIAG-01 evidence: one hit or miss per distinct date-of-birth search, counted at the read. A task whose patient
+        # has no chart makes pick_patient search up to 5 more names with the same DOB; counted per call that would be
+        # six misses, so one odd task could fake a search failure on a clean clinic. Counting at the read also survives
+        # a wait_for that cancels the rest of this call. Fake sites in tests have no dob_searches and are not counted.
+        seen = getattr(site, "dob_searches", None)
+        if seen is not None and path not in seen:
+            seen.add(path)
+            if _patient_rows(data):
+                site.search_hits += 1
+            else:
+                site.search_misses += 1
         tried.append(path)
         if data.get("incomplete"):
             notes.append(f"{path}: {data['incomplete']}")

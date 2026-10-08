@@ -202,6 +202,27 @@ def plausible(task, answer):
     return True
 
 
+PROBE_CODES = {"location": 1, "search": 2, "sign-in": 3}
+
+
+def startup_probe(signed_in, location_ok, hits, misses, need=5):
+    """Which startup stage failed: "" = startup OK, None = not known yet. Set 2/3 show no logs, so a failure is sent
+    as PROBE * code certainly-wrong answers in place of skips, and wrong // PROBE in the tally names the stage."""
+    if hits > 0 and location_ok:
+        return ""          # one hit settles a clinic whose All-locations switch is confirmed
+    if hits + misses < need:
+        return None
+    if location_ok:
+        return "search"    # hits is 0 here, so misses >= need
+    if signed_in or hits > 0:
+        # _location_is_all is False on a clinic with one location or no "All locations" option, so an unconfirmed
+        # switch alone is not a failure: only a majority of misses among the first `need` distinct date-of-birth
+        # searches reports it, and a tie reports nothing, because a probe on a healthy clinic is pure lost points
+        # (DIAG-01: when startup succeeds the probe never fires).
+        return "location" if misses > hits else ""
+    return "sign-in"
+
+
 def confidence_gate(kind, value, info):
     """Every answer, deterministic or model, is sent only at MIN_CONFIDENCE or above; a missing conf counts as 0.
     Strict less-than, like the loop's own check, so exactly MIN_CONFIDENCE is still sent."""

@@ -8,7 +8,7 @@ from .llm import LLM, BudgetExhausted
 from .memory import Memory
 from .queue import Queue
 from .site import Site
-from .solver import Solver
+from .solver import PROBE_CODES, Solver, startup_probe
 
 
 def log(*a):
@@ -42,7 +42,8 @@ async def run():
     est_tasks = config.expected_tasks()
     tasks_seen = 0
 
-    stats = {"answered": 0, "skipped": 0, "messages": 0}
+    stats = {"answered": 0, "skipped": 0, "messages": 0, "probe": 0}
+    stage, probes_left = None, 0   # DIAG-01: the failed startup stage, decided once ("" = startup OK)
     if config.SHIFT_SECONDS == 1200 and os.environ.get("RECON", "1") == "1":
         # Practice only (20 min for 6 tasks): map the app's pages before the queue, since the run stops when it ends.
         await site.ready.wait()
@@ -109,10 +110,28 @@ async def run():
             if time.time() > shift_end + config.SAFETY_SECONDS:
                 log("shift is over")
                 break
+            if stage is None and site.ready.is_set():
+                stage = startup_probe(site.startup.get("signed_in", False), site.startup.get("location_ok", False),
+                                      site.search_hits, site.search_misses)
+                if stage is not None:   # decided once: never re-evaluated for the rest of the shift
+                    probes_left = config.PROBE * PROBE_CODES.get(stage, 0)
+                    print(f"[probe] startup stage={stage or 'ok'} -> {probes_left} probe answers "
+                          f"(hits={site.search_hits} misses={site.search_misses})", flush=True)
             if kind == "answer":
                 stats["answered"] += 1
                 memory.add(item["text"], info.get("route", []), value)
                 state = await queue.close(item["id"], answer=value)
+            elif probes_left > 0:
+                # Set 2/3 show only tallies: a failed startup is sent as PROBE*code certainly-wrong answers in place of
+                # skips, so wrong // PROBE names the stage and no correct answer is lost. Never stored in memory.
+                value = f"PROBE-{stage.upper()}"
+                state = await queue.close(item["id"], answer=value)
+                # Counted only once the queue has moved past the item: one probe too few misreads the stage
+                # (29 // 10 = 2), one too many does not, so a close that may have failed is probed again.
+                if state.get("status") in ("open", "ended") and (state.get("item") or {}).get("id") != item["id"]:
+                    probes_left -= 1
+                    stats["probe"] += 1
+                print(f"[probe] {item['id']} sent {value} ({probes_left} left)", flush=True)
             else:
                 stats["skipped"] += 1
                 state = await queue.close(item["id"], skip=True)
