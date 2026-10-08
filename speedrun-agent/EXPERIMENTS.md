@@ -53,4 +53,4 @@ Probe readout (Sets 2 and 3 show no logs): stage code = wrong // 10: 0 = no fail
 | Tag | Commit | Date | Hypothesis | Set 1 | Set 2 | Set 3 | Total | Probe readout | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | baseline-128 | c0062fa | 2026-10-07 | — | 63 / 64 / 1 / 134 / 25 | 51 / 57 / 6 / 135 / 28 | 14 / 14 / 0 / 373 / 71 | 128 | (no probe) | |
-| phase1 (awaiting score) | a6947cc | 2026-10-07 | Rule 1 guards + no early exit + bounded startup + confidence gate + startup probe (PROBE=10); decode the Set 3 failing stage | running | running | running | | | image i750ae7c79f01 |
+| phase1 (awaiting score) | a6947cc | 2026-10-07 | Rule 1 guards + no early exit + bounded startup + confidence gate + startup probe (PROBE=10); decode the Set 3 failing stage | not run | not run | not run | | | image i750ae7c79f01; not submitted (build-only) |
