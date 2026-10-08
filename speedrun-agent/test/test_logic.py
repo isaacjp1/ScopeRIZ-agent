@@ -12,8 +12,9 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 from agent import clinic, config  # noqa: E402
 from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in, kind_of  # noqa: E402
+from agent.main import kind_label  # noqa: E402
 from agent.memory import Memory  # noqa: E402
-from agent.rules import check_ne  # noqa: E402
+from agent.rules import Rules, check_ne  # noqa: E402
 from agent.site import from_site, learn_routes, same_origin, to_site  # noqa: E402
 from agent.solver import PROBE_CODES, Solver, plausible, run_python, startup_probe  # noqa: E402
 
@@ -100,6 +101,75 @@ def main():
     assert site.shots < 7, site.shots     # later reads decoded without a screenshot
 
     assert config.task_cap(900, 225) == 10.0 and config.task_cap(30, 225) == config.MIN_TASK_SECONDS
+
+    # TIME-01/02: the per-kind time policy, with the tunables pinned so the environment cannot move them
+    config.HOPELESS_AFTER, config.TIGHT_FAIR_SECONDS, config.EXPLORE_EVERY, config.EXPLORE_SECONDS = 3, 6, 6, 30
+    config.SKIP_SECONDS, config.MIN_TASK_SECONDS, config.TASK_SECONDS, config.TIME_STRETCH = 2, 4, 20, 2.5
+    assert config.task_cap(900, 225) == 10.0 == config.task_cap(900, 225, 0.0)
+    assert config.task_cap(900, 225, 0.5) == 15.0 and config.task_cap(30, 225, 0.5) == config.MIN_TASK_SECONDS
+    mem = Memory()
+    assert mem.allot("k", 900, 225) == ("new", 10.0)
+    mem.outcome("k", False)
+    mem.outcome("k", False)
+    assert mem.allot("k", 900, 225)[0] == "new"          # 2 skips in a row: one short of HOPELESS_AFTER
+    mem.outcome("k", False)
+    assert mem.allot("k", 1350, 225)[0] == "new"         # fair share exactly 6.0 is not time-short
+    assert mem.allot("k", 900, 225) == ("written-off", 2)
+    assert [mem.allot("k", 900, 225)[0] for _ in range(4)] == ["written-off"] * 4
+    assert mem.allot("k", 900, 225) == ("retry", 30)      # the 6th written-off task
+    assert [mem.allot("k", 900, 225)[0] for _ in range(5)] == ["written-off"] * 5
+    assert mem.allot("k", 460, 225)[0] == "written-off"  # 12th: 460 - 30 = 430 is not > 225 * 2
+    for _ in range(3):
+        mem.outcome("j", False)
+    assert mem.allot("j", 900, 225)[0] == "written-off"  # labels are separate: j's skips are not k's
+    mem.outcome("k", True)                               # an answer clears k's skip run
+    mode, cap = mem.allot("k", 900, 225)
+    assert mode == "known" and cap >= 10.0, (mode, cap)
+    assert mem.allot("j", 900, 225)[0] == "written-off"
+    mem = Memory()
+    mem.outcome("a", True)
+    assert mem.allot("a", 900, 225) == ("known", 10.0)   # no task seen yet: written-off share 0
+    mem.tasks, mem.written_off = 4, 2
+    assert mem.allot("a", 900, 225) == ("known", 15.0)   # half written off: their time goes to the rest
+    mem.outcome("b", True)
+    for _ in range(3):
+        mem.outcome("b", False)
+    assert mem.allot("b", 900, 225)[0] == "written-off"  # the write-off check comes before "known"
+
+    # REUSE-01: a task's kind is the long rule message it best matches (the for_task IDF ranking)
+    here = os.path.dirname(__file__)
+    filing = open(os.path.join(here, "set1_filing_rule.md"), encoding="utf-8").read()
+    claim = open(os.path.join(here, "set1_claim_rule.md"), encoding="utf-8").read()
+    vending = "The vending machine by the back entrance takes cards again, but the coin slot is still jammed."
+    claims = ["Next step on claim: Coleman, Linda, DOB 1958-09-16, service date 2026-05-11",
+              "Could you look at the claim for Linda Coleman, born 1958-09-16, with the date of service 2026-05-12, "
+              "and tell me the next step?",
+              "I'm going through the claim for Harold Wells with the date of service 2026-07-24. Where does it go from here?"]
+    filings = ["Anderson, Alexander, DOB 1971-07-30, date of service 2026-08-31. We haven't billed this one yet. "
+               "What's the deadline to file?",
+               "Alexander Anderson, born 1971-07-30, has a visit from 2026-06-22 on the not-yet-filed list. Could you "
+               "work out the filing deadline before I send it?",
+               "Filing deadline for Kenneth Howell, DOS 2025-12-18?"]
+    nes = [t1, "Billing question: Guadalupe Driscoll, visit with Sharon Morales, MD on 2025-11-05. Is that a new or an "
+               "established patient visit?"]
+    jones = "How many patients with the last name Jones can you see?"
+    rules = Rules(None)   # items set directly: Rules.add starts a compile task, which needs a running event loop
+    rules.items = [MSG, vending, filing, claim]
+    assert [rules.kind_for(t) for t in claims] == [4, 4, 4], [rules.kind_for(t) for t in claims]
+    assert [rules.kind_for(t) for t in filings] == [3, 3, 3], [rules.kind_for(t) for t in filings]
+    assert [rules.kind_for(t) for t in nes] == [1, 1], [rules.kind_for(t) for t in nes]
+    assert rules.kind_for("zzz qqq") == 0 and rules.kind_for(claims[0].upper()) == 4
+    assert kind_label(rules, claims[0]) == ("m4/claim_next_step", 4)
+    assert kind_label(rules, "zzz qqq") == ("unmatched", 0)
+    assert kind_label(Rules(None), t3) == ("phone", 0)
+    rules.items = [claim, claim]
+    assert rules.kind_for(claims[0]) == 2                # a tie goes to the newer message
+    rules.items = [MSG]
+    assert rules.kind_for(jones) == 1                    # one long message: any shared word assigns the task
+    rules.items = [vending]
+    assert rules.kind_for(claims[0]) == 0                # short messages never become kinds
+    rules.items = []
+    assert rules.kind_for(claims[0]) == 0
 
     # Rule 1, python tool: the child sees no credentials (nor any other parent variable) and no network
     os.environ.update({"LLM_API_KEY": "sk-test", "SITE_PASSWORD": "pw-test", "ZZ_DECOY": "d"})
