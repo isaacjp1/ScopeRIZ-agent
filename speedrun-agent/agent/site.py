@@ -618,7 +618,9 @@ class Site:
                         async with self.login_lock:
                             pass
                     await page.goto(config.SITE_URL + path, wait_until="commit")
-                    if not await self._wait_content(page):
+                    # A sparse sign-in page never counts as content, so waiting first spent 4 x NAV_TIMEOUT per read
+                    # before the sign-in check below: signed-out reads never returned within a task (Plan 01-03).
+                    if not self._is_login_page({}, page.url) and not await self._wait_content(page):
                         continue
                     data = await self._extract(page)
                     if "is not responding" in data["text"][:300]:
