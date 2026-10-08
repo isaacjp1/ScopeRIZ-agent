@@ -49,6 +49,8 @@ SCENARIOS = {
         "agent": {},
         "browser": True,
         "probes": (0, None),
+        # the shell's sidebar is read: on a practice-path clinic the learned routes are identities
+        "log": ["'/patients': '/patients'", "'/billing': '/billing'"],
         "not_log": ["[degraded]"],
     },
     # Sign-in POST answers after 15 s, longer than the 12 s navigation timeout (Phase 1 deferred item).
@@ -104,6 +106,19 @@ SCENARIOS = {
         "not_log": ["[degraded]"],
         "must_answer": ["0", "Chronic cough lasting more than eight weeks", "ESTABLISHED:2025-07-21"],
         "served": ["/people?", "/people/", "/calendar", "/records/"],
+        "not_served": ["/patients", "/schedule", "/billing", "/documents"],
+    },
+    # Renamed paths and a dead patient search: the billing and documents lists are reached through the learned routes
+    # (/invoices?, /records?) and lead to Porter's chart, as in "search".
+    "renamed-search": {
+        "mock": {"MOCK_SHIFT": "120", "MOCK_PATHS": "renamed", "MOCK_BREAK_SEARCH": "1"},
+        "agent": {},
+        "browser": True,
+        "probes": (4, "PROBE-SEARCH"),
+        "log": ["[degraded] search", "'/billing': '/invoices'", "'/documents': '/records'"],
+        "must_answer": ["0", "Chronic cough lasting more than eight weeks"],
+        "max_wrong": 0,
+        "served": ["/records?", "/invoices?", "/people/"],
         "not_served": ["/patients", "/schedule", "/billing", "/documents"],
     },
     "sign-in": {
