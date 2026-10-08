@@ -4,15 +4,23 @@ import os
 import time
 
 from . import config
+from .fast import kind_of
 from .llm import LLM, BudgetExhausted
 from .memory import Memory
 from .queue import Queue
 from .site import Site
-from .solver import Solver
+from .solver import PROBE_CODES, Solver, startup_probe
 
 
 def log(*a):
     print("[agent]", *a, flush=True)
+
+
+def print_kinds(kinds):
+    """Per-kind summary. Printed every 25 tasks too, because the judge may stop the container at time-out and the
+    periodic line is what survives in the Set 1 log. Phase 3 (REUSE-01) replaces the label with the rule-message kind."""
+    rows = " | ".join(f"{k} {s}/{a}/{n} {secs:.0f}s" for k, (s, a, n, secs) in kinds.items())
+    print(f"[kinds] {rows or '(no tasks)'}", flush=True)
 
 
 async def run():
@@ -42,7 +50,9 @@ async def run():
     est_tasks = config.expected_tasks()
     tasks_seen = 0
 
-    stats = {"answered": 0, "skipped": 0, "messages": 0}
+    stats = {"answered": 0, "skipped": 0, "messages": 0, "probe": 0}
+    stage, probes_left = None, 0   # DIAG-01: the failed startup stage, decided once ("" = startup OK)
+    kinds = {}   # DIAG-02: label -> [seen, answered, skipped, seconds], in first-seen order
     if config.SHIFT_SECONDS == 1200 and os.environ.get("RECON", "1") == "1":
         # Practice only (20 min for 6 tasks): map the app's pages before the queue, since the run stops when it ends.
         await site.ready.wait()
@@ -109,16 +119,41 @@ async def run():
             if time.time() > shift_end + config.SAFETY_SECONDS:
                 log("shift is over")
                 break
+            if stage is None and site.ready.is_set():
+                stage = startup_probe(site.startup.get("signed_in", False), site.startup.get("location_ok", False),
+                                      site.search_hits, site.search_misses)
+                if stage is not None:   # decided once: never re-evaluated for the rest of the shift
+                    probes_left = config.PROBE * PROBE_CODES.get(stage, 0)
+                    print(f"[probe] startup stage={stage or 'ok'} -> {probes_left} probe answers "
+                          f"(hits={site.search_hits} misses={site.search_misses})", flush=True)
             if kind == "answer":
                 stats["answered"] += 1
                 memory.add(item["text"], info.get("route", []), value)
                 state = await queue.close(item["id"], answer=value)
+            elif probes_left > 0:
+                # Set 2/3 show only tallies: a failed startup is sent as PROBE*code certainly-wrong answers in place of
+                # skips, so wrong // PROBE names the stage and no correct answer is lost. Never stored in memory.
+                value = f"PROBE-{stage.upper()}"
+                state = await queue.close(item["id"], answer=value)
+                # Counted only once the queue has moved past the item: one probe too few misreads the stage
+                # (29 // 10 = 2), one too many does not, so a close that may have failed is probed again.
+                if state.get("status") in ("open", "ended") and (state.get("item") or {}).get("id") != item["id"]:
+                    probes_left -= 1
+                    stats["probe"] += 1
+                print(f"[probe] {item['id']} sent {value} ({probes_left} left)", flush=True)
             else:
                 stats["skipped"] += 1
                 state = await queue.close(item["id"], skip=True)
             log(f"{item['id']} {kind.upper()} {value!r} in {time.time() - t0:.1f}s | {info.get('why', '')} "
                 f"conf={info.get('conf', '')} pages={len(info.get('route', []))} | task: {item['text']!r}")
+            label = kind_of(item["text"]) or f"after-msg{stats['messages']}"
+            row = kinds.setdefault(label, [0, 0, 0, 0.0])   # seen, answered, skipped (a probe counts as its skip), secs
+            row[0] += 1
+            row[1 if kind == "answer" else 2] += 1
+            row[3] += time.time() - t0
             log(f"   left {state.get('seconds_left', 0):.0f}s  spent ${llm.spent:.3f}  {stats}")
+            if tasks_seen % 25 == 0:
+                print_kinds(kinds)
             if llm.budget_gone and state.get("status") == "open":
                 log("model budget used up")
         except Exception as e:
@@ -129,7 +164,8 @@ async def run():
                 state = await queue.close(item["id"], **field)
             else:
                 state = await queue.current()
-    log(f"done: {state} {stats} spent=${llm.spent:.3f} calls={llm.calls} wall={time.time() - start:.0f}s")
+    print_kinds(kinds)
+    log(f"done:{state} {stats} spent=${llm.spent:.3f} calls={llm.calls} wall={time.time() - start:.0f}s")
     site_task.cancel()
     warm_task.cancel()
     await site.close()

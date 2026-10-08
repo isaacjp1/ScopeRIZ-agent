@@ -11,11 +11,11 @@ import time
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 from agent import clinic, config  # noqa: E402
-from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in  # noqa: E402
+from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in, kind_of  # noqa: E402
 from agent.memory import Memory  # noqa: E402
 from agent.rules import check_ne  # noqa: E402
 from agent.site import same_origin  # noqa: E402
-from agent.solver import Solver, plausible, run_python  # noqa: E402
+from agent.solver import PROBE_CODES, Solver, plausible, run_python, startup_probe  # noqa: E402
 
 MSG = json.load(open(os.path.join(os.path.dirname(__file__), "..", "practice_items.json")))[0]["text"]
 GOOD = {"years": 3, "counting_statuses": ["Completed"], "excluded_services": ["Lab draw", "X-ray"],
@@ -46,6 +46,11 @@ def main():
     assert PHONE_TASK.search(t3) and not PHONE_OTHER.search(t3)
     assert PHONE_OTHER.search("What is the phone number of the practice that referred Carol Jones (born 1982-09-07)?")
     assert DOC_TASK.search(t4) and not DOC_TASK.search(t3)
+    # DIAG-02: kind_of is the label of the deterministic path that takes a task ("" for none), in Fast.solve's order
+    assert kind_of(t1) == "new_established" and kind_of(t3) == "phone" and kind_of(t4) == "document"
+    assert kind_of("How many open slots are there for Logan Brown, MD at Northgate on 2026-10-14?") == "open_slots"
+    assert kind_of("What is the next step on claim C-1?") == "claim_next_step"
+    assert kind_of("How many patients with the last name Jones can you see?") == ""
     assert WHO_REFERRED.search("Referral letter received on 2024-12-01 for patient Ana Corbett: which practice made the referral?")
     assert not WHO_REFERRED.search(t4)
     m = re.search(r"(?:^| \| )referral letter from (.+?)(?: \||$)","Dec 1, 2024 | Referral letter | Referral letter from Granite Fork Internal Medicine | View", re.I)
@@ -148,6 +153,28 @@ def main():
     assert not same_origin("http://site:8000.evil/")
     config.SITE_URL = "https://Site.Example:443"   # the browser reports https://site.example/...
     assert same_origin("https://site.example/x") and not same_origin("http://site.example/x")
+
+    # DIAG-01: which startup stage failed ("" = OK, None = not known yet); location needs a majority of misses
+    T, F = True, False
+    assert startup_probe(T, T, 1, 0) == ""
+    assert startup_probe(T, T, 0, 4) is None
+    assert startup_probe(T, T, 0, 5) == "search"
+    assert startup_probe(T, T, 1, 50) == ""
+    assert startup_probe(F, T, 2, 0) == ""
+    assert startup_probe(F, T, 0, 5) == "search"
+    assert startup_probe(F, F, 0, 5) == "sign-in"
+    assert startup_probe(T, F, 0, 0) is None
+    assert startup_probe(T, F, 0, 4) is None
+    assert startup_probe(T, F, 5, 0) == ""
+    assert startup_probe(T, F, 3, 2) == ""
+    assert startup_probe(F, F, 3, 3) == ""
+    assert startup_probe(T, F, 2, 3) == "location"
+    assert startup_probe(T, F, 3, 9) == "location"
+    assert startup_probe(T, F, 0, 5) == "location"
+    assert startup_probe(F, F, 2, 3) == "location"
+    assert sorted(PROBE_CODES.values()) == [1, 2, 3], PROBE_CODES
+    # decode contract at the default step 10: wrong // 10 is the stage code, wrong % 10 the normal wrongs
+    assert all((10 * c + n) // 10 == c and (10 * c + n) % 10 == n for c in (1, 2, 3) for n in range(10))
     print("all logic checks passed")
 
 

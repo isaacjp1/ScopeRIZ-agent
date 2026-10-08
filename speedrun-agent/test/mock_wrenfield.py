@@ -174,6 +174,8 @@ def content(s, path):
         last, dob = q.get("lastName", "").lower(), q.get("dob", "")
         if not last and not dob:
             return "<h1>Patients</h1><form><input name='lastName'><input name='dob' type='date'></form><p>Search to find a patient</p>"
+        if os.environ.get("MOCK_BREAK_SEARCH"):   # the search form is there, but no search finds anyone
+            return "<h1>Patients</h1><p>No patients match</p>"
         rows = []
         for p in sorted(P.values(), key=lambda x: (x["last"], x["first"])):
             if s["loc"] != "all" and p["loc"] != s["loc"]:
@@ -251,6 +253,10 @@ def content(s, path):
     return "<p>This page is not available</p><p>The address may be mistyped, or the record was removed.</p>"
 
 
+LOGIN_FORM = ('<html><body><form method="post" action="/login"><input type="text" name="u">'
+              '<input type="password" name="pw"><button type="submit">Sign in</button></form></body></html>')
+
+
 class Site(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -269,8 +275,7 @@ class Site(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/login"):
-            return self._send(200, '<html><body><form method="post" action="/login"><input type="text" name="u">'
-                                   '<input type="password" name="pw"><button type="submit">Sign in</button></form></body></html>')
+            return self._send(200, LOGIN_FORM)
         s = sess(self)
         if not s:
             return self._send(302, "", headers={"Location": "/login"})
@@ -293,6 +298,8 @@ class Site(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
         if self.path.startswith("/login"):
             time.sleep(float(os.environ.get("MOCK_SLOW_LOGIN") or 0))
+            if os.environ.get("MOCK_BREAK_LOGIN"):   # sign-in never works: the form again, no session
+                return self._send(200, LOGIN_FORM)
             sid = "%x" % random.getrandbits(40)
             SESS[sid] = {"loc": "Northgate", "size": 5, "page": {}}
             return self._send(302, "", headers={"Location": "/", "Set-Cookie": f"sid={sid}; Path=/"})

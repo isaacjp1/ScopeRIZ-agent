@@ -43,6 +43,7 @@ TIME_STRETCH = _f("TIME_STRETCH", 2.5)        # a task may use this many times i
 MAX_TURNS = int(_f("MAX_TURNS", 10))         # LLM turns per task
 MIN_CONFIDENCE = _f("MIN_CONFIDENCE", 0.7)   # answer only above this (wrong = -1)
 SAFETY_SECONDS = _f("SAFETY_SECONDS", 3)     # stop this close to the end of the shift
+PROBE = int(_f("PROBE", 10))                 # probe answers per stage code when startup fails; 0 = off (Phase 5 release build)
 
 # Browser
 PAGE_POOL = int(_f("PAGE_POOL", 6))          # parallel browser tabs

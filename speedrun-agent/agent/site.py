@@ -214,6 +214,12 @@ class Site:
         self.last_login = 0.0
         self.relogins = 0
         self.blocked = set()      # hosts the browser was stopped from reaching, printed once each; kept across retries
+        # startup state for the DIAG-01 probe
+        self.signed_in = False
+        self.startup = {}
+        self.search_hits = 0
+        self.search_misses = 0
+        self.dob_searches = set()
 
     # ---------- startup ----------
     async def start(self):
@@ -228,6 +234,8 @@ class Site:
             self.pages = asyncio.Queue()
             self.inflight = {}
             await asyncio.sleep(2)
+        # a snapshot, because _relogin resets location_ok mid-shift
+        self.startup = {"signed_in": self.signed_in and not self.error, "location_ok": self.location_ok and not self.error}
         self.ready.set()
 
     async def _start_once(self):
@@ -272,8 +280,10 @@ class Site:
             extra = await asyncio.gather(*[self._new_page() for _ in range(max(0, config.PAGE_POOL - 1))])
             for p in extra:
                 self.pages.put_nowait(p)
-            print(f"[site] ready in {time.time() - t0:.1f}s  location_ok={self.location_ok} today={self.today!r}",
-                  flush=True)
+            # navigation learned from the dashboard: what Phase 2 (ROB-02) needs to know about an unseen clinic
+            nav = sorted({h.split("?")[0] for _, h in self.cache.get("/", {}).get("links", []) if h.startswith("/")})
+            print(f"[site] ready in {time.time() - t0:.1f}s  sign-in={self.signed_in} location_ok={self.location_ok} "
+                  f"today={self.today!r} nav={len(nav)} {nav[:25]}", flush=True)
         except Exception as e:  # keep the agent alive; tasks will be skipped
             self.error = repr(e)
             print(f"[site] startup failed: {e!r}", flush=True)
@@ -320,6 +330,8 @@ class Site:
                 break
         if not pw_el:
             print(f"[site] no login form (already signed in or open site), at {page.url}", flush=True)
+            # an open site such as practice counts as signed in, a page that never loaded does not
+            self.signed_in = page.url.startswith(config.SITE_URL)
             return
         user_el = None
         for sel in ["input[type=email]", "input[autocomplete=username]", "input[name*=user i]", "input[id*=user i]",
@@ -348,6 +360,7 @@ class Site:
             except Exception:
                 pass
         still = await self._find_frame(page, "input[type=password]", seconds=0.5)
+        self.signed_in = not still[1] and "/login" not in page.url
         print(f"[site] signed in, now at {page.url}" + (" (WARNING: a password field is still shown)" if still[1] else ""),
               flush=True)
 
