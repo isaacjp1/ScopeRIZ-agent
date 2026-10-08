@@ -142,6 +142,13 @@ TOOLS = [
 ]
 
 
+# Prepended to the python tool's code: Rule 1 allows only the three judge addresses, and model-written code needs none.
+NO_NET = ("import socket\n"
+          "def _no_net(*a, **k):\n    raise OSError('network is disabled in the python tool')\n"
+          "class _NoNet(socket.socket):\n    def __init__(self, *a, **k):\n        _no_net()\n"
+          "socket.socket = _NoNet\nsocket.create_connection = _no_net\nsocket.getaddrinfo = _no_net\n")
+
+
 def run_python(code, pages, timeout=6):
     pages_file = os.path.join(config.WORK_DIR, "pages.json")
     with open(pages_file, "w") as f:
@@ -149,7 +156,10 @@ def run_python(code, pages, timeout=6):
     prelude = ("import json, re, math, datetime\nfrom datetime import date, timedelta\n"
                f"PAGES = json.load(open({pages_file!r}))\n")
     try:
-        r = subprocess.run([sys.executable, "-c", prelude + code], capture_output=True, text=True, timeout=timeout)
+        # -I and an env holding only PATH: the child never sees LLM_API_KEY or SITE_PASSWORD; the parent keeps both.
+        # limit: import _socket still opens a raw socket; Rule 1 hygiene for a non-hostile model, the judge network refuses every other address
+        r = subprocess.run([sys.executable, "-I", "-c", NO_NET + prelude + code], capture_output=True, text=True,
+                           timeout=timeout, env={"PATH": os.environ.get("PATH", "")})
         out = (r.stdout + ("\nSTDERR: " + r.stderr[-1500:] if r.returncode else ""))
     except subprocess.TimeoutExpired:
         out = "timeout"
@@ -190,6 +200,17 @@ def plausible(task, answer):
     if re.search(r"\bwhat\b[^?]{0,30}\bphone\b", t) and not isinstance(answer, list):
         return len(re.sub(r"\D", "", s)) in (10, 11)
     return True
+
+
+def confidence_gate(kind, value, info):
+    """Every answer, deterministic or model, is sent only at MIN_CONFIDENCE or above; a missing conf counts as 0.
+    Strict less-than, like the loop's own check, so exactly MIN_CONFIDENCE is still sent."""
+    if kind != "answer":
+        return kind, value, info
+    conf = float(info.get("conf") or 0)
+    if conf < config.MIN_CONFIDENCE:
+        return "skip", None, {**info, "why": f"below confidence gate {conf}"}
+    return kind, value, info
 
 
 class Solver:
@@ -242,7 +263,7 @@ class Solver:
             res = None
         if res:
             res[2]["secs"] = round(time.time() - t0, 1)
-            return res
+            return confidence_gate(*res)
         if not allow_loop:
             return "skip", None, {"why": "loop not allowed (hopeless kind, time short)", "route": []}
         if self.llm.spent >= config.BUDGET * config.LOOP_BUDGET_SHARE:
@@ -251,7 +272,7 @@ class Solver:
         if kind == "answer" and not plausible(task_text, value):
             kind, info = "skip", {**info, "why": f"implausible answer {value!r}"[:150]}
         self.memory.outcome(task_text, kind == "answer")
-        return kind, value, info
+        return confidence_gate(kind, value, info)
 
     async def _loop(self, task_text, deadline):
         t0 = time.time()

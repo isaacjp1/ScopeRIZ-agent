@@ -37,7 +37,9 @@ class LLM:
         if self.model:
             print(f"[llm] model {self.model} (from MODEL)", flush=True)
             return
-        status, data = await request("GET", f"{config.LLM_BASE_URL}/models", headers=self._headers(), timeout=15)
+        # Listing runs in the background; a slow listing must not hold the first tasks (they wait on self.ready
+        # inside their own caps), so give up on it quickly.
+        status, data = await request("GET", f"{config.LLM_BASE_URL}/models", headers=self._headers(), timeout=5)
         ids = set()
         if status == 200:
             ids = {m.get("id") for m in data.get("data", [])}

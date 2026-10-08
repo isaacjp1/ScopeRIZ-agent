@@ -15,8 +15,7 @@ import asyncio
 import io
 import re
 import time
-
-from playwright.async_api import async_playwright
+from urllib.parse import urlsplit
 
 from . import config
 
@@ -175,6 +174,17 @@ def _int(s):
     return int(str(s).replace(",", ""))
 
 
+def same_origin(url):
+    """Rule 1: the browser may reach only SITE_URL (same scheme, host and port); data:, blob: and about: never leave the box."""
+    def origin(s):   # Chromium reports hosts in lower case and drops a default port: compare normalised parts
+        u = urlsplit(s)
+        return u.scheme, u.hostname, u.port or {"http": 80, "https": 443}.get(u.scheme)
+    try:
+        return urlsplit(url).scheme in ("data", "blob", "about") or origin(url) == origin(config.SITE_URL)
+    except ValueError:   # a port that is not a number in 0-65535
+        return False
+
+
 class Site:
     def __init__(self):
         self.pw = None
@@ -203,6 +213,7 @@ class Site:
         self.login_lock = asyncio.Lock()
         self.last_login = 0.0
         self.relogins = 0
+        self.blocked = set()      # hosts the browser was stopped from reaching, printed once each; kept across retries
 
     # ---------- startup ----------
     async def start(self):
@@ -221,15 +232,32 @@ class Site:
 
     async def _start_once(self):
         try:
+            # Imported here: a missing or broken Playwright is then a caught startup failure like any other, and the
+            # logic tests can import this module without Playwright (same lazy pattern as pypdf in pdf_text).
+            from playwright.async_api import async_playwright
             t0 = time.time()
             self.pw = await async_playwright().start()
             self.browser = await self.pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
-            self.ctx = await self.browser.new_context(viewport={"width": 1400, "height": 1000})
+            # service_workers="block": context routes do not see requests a service worker handles.
+            self.ctx = await self.browser.new_context(viewport={"width": 1400, "height": 1000}, service_workers="block")
             self.ctx.set_default_timeout(config.NAV_TIMEOUT * 1000)
-            # Do NOT block fonts or images: the anti-bot check hashes the rendered layout, which depends on fonts.
+
+            async def _guard(route):
+                if same_origin(route.request.url):
+                    return await route.continue_()
+                host = urlsplit(route.request.url).netloc
+                if host not in self.blocked:
+                    self.blocked.add(host)
+                    print(f"[site] blocked a request to {host} (Rule 1)", flush=True)
+                await route.abort()
+            # Rule 1 guard on the context, before the first tab: it covers every pooled tab, popup and frame.
+            # Do NOT block fonts or images: the anti-bot check hashes the rendered layout, which depends on fonts
+            # (everything on the SITE_URL origin passes).
+            # limit: a redirect from SITE_URL to another host is followed without calling the handler again (Playwright routes the original request only); the judge network refuses other hosts
+            await self.ctx.route("**/*", _guard)
             first = await self._new_page()
             await self._login(first)
             self.last_login = time.time()
@@ -720,6 +748,8 @@ class Site:
             if not href:
                 continue
             url = href if href.startswith("http") else config.SITE_URL + (href if href.startswith("/") else "/" + href)
+            if not same_origin(url):   # ctx.request may bypass the context route: check the host here (Rule 1)
+                continue
             key = "file:" + url
             if key in self.cache:
                 out["text"] = self.cache[key]

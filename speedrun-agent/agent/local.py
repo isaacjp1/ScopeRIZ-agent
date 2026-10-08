@@ -8,8 +8,13 @@ Needs LLM_API_KEY (your development key) in the environment.
 """
 import asyncio
 import json
+import os
 import sys
 import time
+
+# Local runs target the hosted practice clinic; the judge entry point (agent.main) requires all three URL variables.
+os.environ.setdefault("SITE_URL", "https://practice.speedrun.scopehealth.com")
+os.environ.setdefault("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 
 from . import config
 from .llm import LLM

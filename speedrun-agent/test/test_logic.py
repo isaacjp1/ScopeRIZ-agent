@@ -4,13 +4,18 @@ import datetime as dt
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, ROOT)
 from agent import clinic, config  # noqa: E402
 from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in  # noqa: E402
+from agent.memory import Memory  # noqa: E402
 from agent.rules import check_ne  # noqa: E402
-from agent.solver import plausible  # noqa: E402
+from agent.site import same_origin  # noqa: E402
+from agent.solver import Solver, plausible, run_python  # noqa: E402
 
 MSG = json.load(open(os.path.join(os.path.dirname(__file__), "..", "practice_items.json")))[0]["text"]
 GOOD = {"years": 3, "counting_statuses": ["Completed"], "excluded_services": ["Lab draw", "X-ray"],
@@ -90,6 +95,59 @@ def main():
     assert site.shots < 7, site.shots     # later reads decoded without a screenshot
 
     assert config.task_cap(900, 225) == 10.0 and config.task_cap(30, 225) == config.MIN_TASK_SECONDS
+
+    # Rule 1, python tool: the child sees no credentials (nor any other parent variable) and no network
+    os.environ.update({"LLM_API_KEY": "sk-test", "SITE_PASSWORD": "pw-test", "ZZ_DECOY": "d"})
+    os.makedirs(config.WORK_DIR, exist_ok=True)   # run_python writes pages.json there
+    out = run_python("import os; print(*(os.environ.get(k) for k in ('LLM_API_KEY', 'SITE_PASSWORD', 'ZZ_DECOY')))", {})
+    assert out.strip() == "None None None", out
+    out = run_python("import urllib.request; urllib.request.urlopen('http://127.0.0.1:9')", {})
+    assert "network is disabled in the python tool" in out, out
+    out = run_python("import socket; socket.create_connection(('127.0.0.1', 9))", {})
+    assert "network is disabled in the python tool" in out, out
+    out = run_python("print(PAGES['/a'], datetime.date(2026, 1, 2) + timedelta(days=1))", {"/a": "hello"})
+    assert out.strip() == "hello 2026-01-03", out
+    assert run_python("", {}) == "(no output)"
+    out = run_python("print('first'); raise ValueError('x')", {})
+    assert out.startswith("first") and "STDERR:" in out and "ValueError" in out, out
+    assert os.environ["LLM_API_KEY"] == "sk-test"   # the agent itself keeps its key
+
+    # SAFE-03: the judge entry point names every missing URL variable and exits 1
+    def require(**urls):
+        return subprocess.run([sys.executable, "-c", "from agent import config; config.require_urls()"], cwd=ROOT,
+                              env={"PATH": os.environ["PATH"], **urls}, capture_output=True, text=True)
+    r = require(QUEUE_URL="http://q", SITE_URL="http://s")
+    assert r.returncode == 1 and "LLM_BASE_URL" in r.stderr and "SITE_URL" not in r.stderr, r.stderr
+    r = require()
+    assert r.returncode == 1 and all(k in r.stderr for k in ("QUEUE_URL", "SITE_URL", "LLM_BASE_URL")), r.stderr
+    r = require(QUEUE_URL="http://q", SITE_URL="http://s", LLM_BASE_URL="http://l")
+    assert r.returncode == 0, r.stderr
+
+    # SAFE-04: every answer passes the confidence gate (strict less-than; a missing conf skips)
+    def gated(info):
+        s = Solver(object(), object(), Memory())
+
+        async def fixed(text):
+            return "answer", "42", dict(info, route=[])
+        s.fast.solve = fixed
+        return asyncio.run(s.solve("t", time.time() + 5, allow_loop=False))
+    res = gated({"conf": 0.5})
+    assert res[0] == "skip" and "below confidence gate" in res[2]["why"], res
+    assert gated({"conf": 0.9})[0] == "answer" and gated({"conf": 0.7})[0] == "answer"
+    assert gated({})[0] == "skip"
+
+    # Rule 1, browser: same scheme, host and port as SITE_URL only; data:, blob: and about: never leave the box
+    config.SITE_URL = "http://site:8000"
+    assert same_origin("http://site:8000/patients?x=1")
+    assert same_origin("data:image/png;base64,AA")
+    assert same_origin("blob:x")
+    assert same_origin("about:blank")
+    assert not same_origin("https://fonts.googleapis.com/css")
+    assert not same_origin("http://site:80001/")
+    assert not same_origin("https://site:8000/")
+    assert not same_origin("http://site:8000.evil/")
+    config.SITE_URL = "https://Site.Example:443"   # the browser reports https://site.example/...
+    assert same_origin("https://site.example/x") and not same_origin("http://site.example/x")
     print("all logic checks passed")
 
 

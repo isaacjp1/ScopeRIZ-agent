@@ -1,5 +1,6 @@
 """All tunables in one place. Every value can be overridden with an env var in the Dockerfile."""
 import os
+import sys
 
 
 def _f(name, default):
@@ -10,10 +11,10 @@ def _f(name, default):
 
 
 QUEUE_URL = os.environ.get("QUEUE_URL", "").rstrip("/")
-SITE_URL = os.environ.get("SITE_URL", "https://practice.speedrun.scopehealth.com").rstrip("/")
+SITE_URL = os.environ.get("SITE_URL", "").rstrip("/")
 SITE_USERNAME = os.environ.get("SITE_USERNAME", "agent")
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "agent")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").rstrip("/")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 SHIFT_SECONDS = _f("SHIFT_SECONDS", 900)
 WORK_DIR = os.environ.get("WORK_DIR", "/tmp/work")
@@ -74,6 +75,13 @@ KNOWN_KIND_SECONDS = _f("KNOWN_KIND_SECONDS", 10)   # was 28: starved the late k
 KNOWN_KIND_MIN_FAIR = _f("KNOWN_KIND_MIN_FAIR", 6)    # and only while the fair share of the time left is above this
 EXPLORE_SECONDS = _f("EXPLORE_SECONDS", 30)
 SKIP_SECONDS = _f("SKIP_SECONDS", 2)
+
+
+def require_urls():
+    """Rule 1: the judge passes all three addresses; never fall back to a public host."""
+    missing = [k for k in ("QUEUE_URL", "SITE_URL", "LLM_BASE_URL") if not globals()[k]]
+    if missing:
+        sys.exit("[agent] missing environment variable(s): " + ", ".join(missing))
 
 
 def expected_tasks():

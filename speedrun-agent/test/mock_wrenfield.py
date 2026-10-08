@@ -19,6 +19,7 @@ import os
 import random
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -112,7 +113,7 @@ def shell(s):
     tok = "%x" % random.getrandbits(48)
     return f"""<!doctype html><html><head><title>Wrenfield</title><style>#menu{{display:none}} #menu.open{{display:block}}
 iframe{{width:1200px;height:900px;border:0}}</style></head><body>
-<a href="#main">Skip to main content</a>
+<a href="#main">Skip to main content</a><img src="http://blocked.example/x.png" alt="">
 <nav><a href="/">Dashboard</a> <a href="/patients">Patients</a> <a href="/schedule">Schedule</a> <a href="/documents">Documents</a></nav>
 <header><div role="button" aria-haspopup="true" onclick="document.getElementById('menu').classList.toggle('open')">
 <span>Location</span><br><span>{label}</span></div>
@@ -291,6 +292,7 @@ class Site(BaseHTTPRequestHandler):
         self.rfile.read(n)
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
         if self.path.startswith("/login"):
+            time.sleep(float(os.environ.get("MOCK_SLOW_LOGIN") or 0))
             sid = "%x" % random.getrandbits(40)
             SESS[sid] = {"loc": "Northgate", "size": 5, "page": {}}
             return self._send(302, "", headers={"Location": "/", "Set-Cookie": f"sid={sid}; Path=/"})
@@ -321,7 +323,20 @@ ITEMS = [
     {"id": "i007", "kind": "task", "text": "Is Laura Torres (born 2001-02-20) new or established for Elena Gutierrez, NP on 2025-12-30?", "expected": "ESTABLISHED:2025-08-14"},
     {"id": "i008", "kind": "task", "text": "How many patients with the last name Jones can you see?", "expected": "x"},
 ]
-QSTATE = {"i": 0, "log": []}
+QSTATE = {"i": 0, "log": [], "t0": None}
+
+
+def elapsed():
+    return time.time() - QSTATE["t0"] if QSTATE["t0"] else 0.0
+
+
+def queue_down():
+    """MOCK_QUEUE_ERRORS=a-b: the queue answers 500 while the shift clock reads between a and b seconds."""
+    w = os.environ.get("MOCK_QUEUE_ERRORS")
+    if not w or not QSTATE["t0"]:
+        return False
+    a, b = (float(x) for x in w.split("-"))
+    return a <= elapsed() <= b
 
 
 class Q(BaseHTTPRequestHandler):
@@ -338,12 +353,24 @@ class Q(BaseHTTPRequestHandler):
 
     def state(self):
         i = QSTATE["i"]
+        shift = os.environ.get("MOCK_SHIFT")
+        if shift:   # a timed shift: items cycle with fresh ids until the clock (started by the first call) runs out
+            if QSTATE["t0"] is None:
+                QSTATE["t0"] = time.time()
+            left = float(shift) - elapsed()
+            if left <= 0:
+                return {"status": "ended", "reason": "time"}
+            it = ITEMS[i % len(ITEMS)]
+            return {"status": "open", "seconds_left": round(left, 1),
+                    "item": {"id": f"{it['id']}-{i}", "kind": it["kind"], "text": it["text"]}}
         if i >= len(ITEMS):
             return {"status": "ended", "reason": "queue_finished"}
         return {"status": "open", "seconds_left": 600.0, "item": {k: ITEMS[i][k] for k in ("id", "kind", "text")}}
 
     def do_GET(self):
         if self.path == "/item":
+            if queue_down():
+                return self._json(500, {"error": {"code": "internal"}})
             return self._json(200, self.state())
         if self.path == "/calls":
             return self._json(200, CALLS)
@@ -353,13 +380,15 @@ class Q(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        if queue_down():
+            return self._json(500, {"error": {"code": "internal"}})
         st = self.state()
         if st["status"] != "open":
             return self._json(409, {"error": {"code": "ended"}, "state": st})
         if body.get("id") != st["item"]["id"]:
             return self._json(409, {"error": {"code": "not_current"}, "state": st})
-        it = ITEMS[QSTATE["i"]]
-        QSTATE["log"].append({**body, "expected": it.get("expected")})
+        it = ITEMS[QSTATE["i"] % len(ITEMS)]
+        QSTATE["log"].append({**body, "expected": it.get("expected"), "t": round(elapsed(), 1)})
         QSTATE["i"] += 1
         self._json(200, self.state())
 
@@ -378,6 +407,7 @@ class L(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
+        time.sleep(float(os.environ.get("MOCK_SLOW_MODELS") or 0))
         self._json(200, {"data": [{"id": "fake"}]})
 
     def do_POST(self):
@@ -456,7 +486,6 @@ def serve(port, h):
 
 
 if __name__ == "__main__":
-    import time
     serve(8811, Site), serve(8812, Q), serve(8813, L)
     print("mock wrenfield up", flush=True)
     while True:
