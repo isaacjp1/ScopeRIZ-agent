@@ -126,6 +126,12 @@ def _name_match(row_name, last, first):
     return ok
 
 
+def search_dead(site):
+    """The patient search found nobody for the first 5 distinct dates of birth (the startup probe's search evidence);
+    fake sites in tests never count as dead."""
+    return getattr(site, "search_hits", 1) == 0 and getattr(site, "search_misses", 0) >= 5
+
+
 async def find_patient(site, last_name=None, first_name=None, dob=None):
     """Search by date of birth (exact) and/or last name; return matching chart rows with flags."""
     tried, rows, notes = [], [], []
@@ -146,6 +152,9 @@ async def find_patient(site, last_name=None, first_name=None, dob=None):
                 site.search_hits += 1
             else:
                 site.search_misses += 1
+                if site.search_misses == 5 and search_dead(site):   # once: misses only grow
+                    print("[degraded] search: 5 date-of-birth searches found nobody; patients are now looked up "
+                          "through the documents and billing lists", flush=True)
         tried.append(path)
         if data.get("incomplete"):
             notes.append(f"{path}: {data['incomplete']}")
@@ -204,7 +213,10 @@ async def find_patient_anywhere(site, last_name, dob=None, max_charts=6):
     out = []
     for data in await site.read_many(list(dict.fromkeys(charts))[:max_charts]):
         txt = data.get("text", "")
-        name = re.sub(r"\s*·.*$", "", data.get("title", "")).strip()
+        # practice titles read "Johnston, Linda · Wrenfield"; another version's title may not carry the name, then the
+        # chart heading "Last, First" (the first line of the chart text) does
+        title = data.get("title", "")
+        name = title.split("·")[0].strip() if "·" in title else next((ln.strip() for ln in txt.splitlines() if ln.strip()), "")
         m_dob = re.search(r"Date of birth\s*\n?\s*(\d{2}/\d{2}/\d{4})", txt)
         m_mrn = re.search(r"MRN\s*\n?\s*([A-Z]{1,4}\d{5,})", txt)
         if not name or not m_dob:

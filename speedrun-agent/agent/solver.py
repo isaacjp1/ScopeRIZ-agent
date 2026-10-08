@@ -251,6 +251,9 @@ class Solver:
             "NOT confirmed as All locations: the patient search may show only one location's patients. If a patient "
             "is not found, look for them in /documents?patient=<last name> and /billing?patient=<last name>, whose rows "
             "lead to the chart")
+        if clinic.search_dead(self.site):
+            loc += (" The patient search found nobody for the first 5 dates of birth: find patients through "
+                    "/documents?patient=<last name> and /billing?patient=<last name>, whose rows lead to the chart.")
         return (SYSTEM.replace("{notes}", NOTES).replace("{extra}", EXTRA_NOTES)
                 .replace("{today}", getattr(self.site, "today", "") or "see the dashboard at /")
                 .replace("{location}", loc).replace("{messages}", msgs))

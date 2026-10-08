@@ -72,9 +72,10 @@ async def pick_patient(site, task, without=()):
     res = await clinic.find_patient(site, dob=dob.isoformat())
     if res.get("notes") and any("could be read" in n for n in res["notes"]):
         return None, "patient list incomplete"
-    if not getattr(site, "location_ok", True):
-        # The patient search shows only the working location's patients: add charts found through the lists that
-        # cover every location, for each capitalized word of the task that could be the last name.
+    if not getattr(site, "location_ok", True) or clinic.search_dead(site):
+        # The patient search shows only the working location's patients, or finds nobody at all: add charts found
+        # through the lists that cover every location, for each capitalized word of the task that could be the last name.
+        # limit: up to 6 words x 2 list reads per task in degraded mode; cache the lists per last name if a Set 1 log shows this eating the task cap
         seen = {r["path"] for r in res.get("matches", [])}
         words = [w for w in dict.fromkeys(re.findall(r"\b[A-Z][a-zA-Z'\u00C0-\u017F-]{1,}\b", task))
                  if w.lower() not in NOT_NAMES]

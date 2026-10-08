@@ -228,7 +228,7 @@ def content(s, path):
     m = re.match(r"^/documents(?:/(\w+))?$", u.path)
     if m:
         docs = [(p, d) for p in P.values() for d in p["docs"]]
-        rows = "".join(f'<tr><td>{d["received"]}</td><td>{d["type"]}</td><td>{d["title"]}</td><td>{p["last"]}, {p["first"]}</td><td><a href="/documents/{d["id"]}">View</a></td></tr>' for p, d in docs)
+        rows = "".join(f'<tr><td>{d["received"]}</td><td>{d["type"]}</td><td>{d["title"]}</td><td><a href="/patients/{p["id"]}">{p["last"]}, {p["first"]}</a></td><td><a href="/documents/{d["id"]}">View</a></td></tr>' for p, d in docs)
         viewer = ""
         if m.group(1):
             d = next(d for _, d in docs if d["id"] == m.group(1))
@@ -249,7 +249,7 @@ def content(s, path):
         ina = "".join(f'<option value="{x[0]}">{x[1]}</option>' for x in PROVIDERS if not x[3])
         return (f"<h1>Schedule</h1><h2>{pr[1]}</h2><p>{pr[2]} · Wednesday, October 14, 2026</p>"
                 f'<label>Provider</label><select name="provider"><optgroup label="Active">{act}</optgroup><optgroup label="Inactive">{ina}</optgroup></select>'
-                "<p>Nothing scheduled on this day</p>")
+                f"<p>Nothing scheduled on this day</p><p>{pr[1]} has no working hours or appointments on Wednesday, October 14, 2026.</p>")
     return "<p>This page is not available</p><p>The address may be mistyped, or the record was removed.</p>"
 
 
@@ -334,6 +334,7 @@ ITEMS = [
     {"id": "i006", "kind": "task", "text": "Referral letter received on 2025-09-16 for patient Gregory Porter (born 1976-04-08): what reason does it give for the referral?", "expected": "Chronic cough lasting more than eight weeks"},
     {"id": "i007", "kind": "task", "text": "Is Laura Torres (born 2001-02-20) new or established for Elena Gutierrez, NP on 2025-12-30?", "expected": "ESTABLISHED:2025-08-14"},
     {"id": "i008", "kind": "task", "text": "How many patients with the last name Jones can you see?", "expected": "x"},
+    {"id": "i009", "kind": "task", "text": "How many open slots are there for Logan Brown, MD at Northgate on 2026-10-14?", "expected": "0"},
 ]
 QSTATE = {"i": 0, "log": [], "t0": None}
 
@@ -432,8 +433,12 @@ class L(BaseHTTPRequestHandler):
                                     "usage": {"cost": 0.0005}})
 
         first = msgs[0]["content"]
-        if not isinstance(first, str):   # screenshot of a chart: "read" the phone of the chart shown last
-            return say({"phone": P[LAST_CHART[0]]["phone"], "email": "", "address": ""})
+        if not isinstance(first, str):
+            # the document fast path sends its text prompt as a content list too; anything else is a chart screenshot
+            # whose phone the mock "reads" from the chart shown last
+            first = next((c.get("text", "") for c in first if c.get("type") == "text"), "")
+            if not first.startswith("Answer the question using ONLY the document"):
+                return say({"phone": P[LAST_CHART[0]]["phone"], "email": "", "address": ""})
         if first.startswith("The clinic messages below"):
             excl = re.search(r"never make a patient established: ([^.]+)\.", first).group(1).split(", ")
             return say({"years": 3, "counting_statuses": ["Completed"], "excluded_services": excl,

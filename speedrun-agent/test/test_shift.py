@@ -66,12 +66,19 @@ SCENARIOS = {
         "agent": {},
         "browser": True,
         "probes": (2, "PROBE-LOCATION"),
+        "log": ["[degraded] location"],
+        "must_answer": ["0", "Chronic cough lasting more than eight weeks"],
+        "max_wrong": 0,
     },
+    # The list route starts only after the 5th miss, so Porter's task is answered in the second cycle of items.
     "search": {
-        "mock": {"MOCK_SHIFT": "90", "MOCK_BREAK_SEARCH": "1"},
+        "mock": {"MOCK_SHIFT": "120", "MOCK_BREAK_SEARCH": "1"},
         "agent": {},
         "browser": True,
         "probes": (4, "PROBE-SEARCH"),
+        "log": ["[degraded] search"],
+        "must_answer": ["0", "Chronic cough lasting more than eight weeks"],
+        "max_wrong": 0,
     },
     # User name on one page, password on the next (POST /login/identify). The name field is type=email, so the user
     # name must be an address: Chromium's form check blocks the submit of "agent", as it would for a person.
