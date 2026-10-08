@@ -14,7 +14,7 @@ from agent import clinic, config  # noqa: E402
 from agent.fast import DOC_TASK, NE_TASK, PHONE_OTHER, PHONE_TASK, WHO_REFERRED, dates_in, kind_of  # noqa: E402
 from agent.memory import Memory  # noqa: E402
 from agent.rules import check_ne  # noqa: E402
-from agent.site import same_origin  # noqa: E402
+from agent.site import from_site, learn_routes, same_origin, to_site  # noqa: E402
 from agent.solver import PROBE_CODES, Solver, plausible, run_python, startup_probe  # noqa: E402
 
 MSG = json.load(open(os.path.join(os.path.dirname(__file__), "..", "practice_items.json")))[0]["text"]
@@ -175,6 +175,32 @@ def main():
     assert sorted(PROBE_CODES.values()) == [1, 2, 3], PROBE_CODES
     # decode contract at the default step 10: wrong // 10 is the stage code, wrong % 10 the normal wrongs
     assert all((10 * c + n) // 10 == c and (10 * c + n) % 10 == n for c in (1, 2, 3) for n in range(10))
+
+    # ROB-02: section routes from the sidebar; translated both ways at the Site boundary
+    config.SITE_URL = "http://site:8000"
+    R = {"/patients": "/people", "/schedule": "/calendar", "/billing": "/invoices", "/documents": "/records"}
+    assert learn_routes([["Patients", "/people"], ["Schedule", "/calendar?date=2026-10-14"], ["Billing", "/invoices/"],
+                         ["Documents", "/records"]]) == R
+    assert learn_routes([["Patients", "/patients"]]) == {"/patients": "/patients"}
+    assert learn_routes([["Patients", "/people"], ["Patients", "/other"]]) == {"/patients": "/people"}
+    assert learn_routes([[" patients ", "/people"]]) == {"/patients": "/people"}
+    assert learn_routes([["Patients", "http://site:8000/people"]]) == {"/patients": "/people"}
+    assert learn_routes([["Patients", "https://elsewhere.example/people"], ["Patients", "/"], ["Patients", "#main"],
+                         ["Inbox", "/inbox"], ["Billing", "//cdn.example/x"]]) == {}
+    assert to_site("/patients?dob=1976-04-08", R) == "/people?dob=1976-04-08"
+    assert to_site("/patients/gp/documents", R) == "/people/gp/documents"
+    assert to_site("/patients", R) == "/people"
+    assert to_site("/patientsx", R) == "/patientsx"
+    assert to_site("/v/1", R) == "/v/1"
+    assert to_site("/patients/gp", {}) == "/patients/gp"
+    assert from_site("/people/gp", R) == "/patients/gp"
+    assert from_site("/records/d1", R) == "/documents/d1"
+    assert from_site("/peoplex", R) == "/peoplex"
+    assert from_site("/people?dob=1", R) == "/patients?dob=1"
+    S = {"/documents": "/billing", "/billing": "/documents"}
+    assert to_site("/documents/x", S) == "/billing/x"
+    for p in ("/documents/x", "/billing?patient=A", "/patients/1"):
+        assert from_site(to_site(p, S), S) == p, p
     print("all logic checks passed")
 
 
