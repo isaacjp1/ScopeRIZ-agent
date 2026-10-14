@@ -4,3 +4,9 @@ __pycache__/
 .env
 .env.*
 agent/work/
+
+# agent snapshots and downloaded archives
+*.zip
+*:Zone.Identifier
+v*-agent/
+speedrun-kit/v59/
